@@ -23,7 +23,6 @@ class OpenAILLM(LLM):
 
     def call(self, instruction: str, value: str = "", suffix: str = "") -> str:
         prompt = f"{instruction}\n{value}\n{suffix}".strip()
-
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -41,7 +40,7 @@ class OpenAILLM(LLM):
 
 
 class StatisticalLLMAgent(LoggerMixin):
-    """Advanced LLM-powered agent for statistical and relational data analysis using multiple DataFrames."""
+    """LLM-powered agent for advanced statistical and relational data analysis using multiple DataFrames."""
 
     def __init__(self, dataframes: Dict[str, pd.DataFrame]):
         self.dataframes = dataframes
