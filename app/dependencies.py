@@ -41,12 +41,12 @@ def get_statistical_analyzer(data: Tuple[pd.DataFrame, dict] = Depends(get_curre
 
 
 def get_llm_agent(
-    data: Tuple[pd.DataFrame, dict] = Depends(get_current_data),
-    analyzer: StatisticalAnalyzer = Depends(get_statistical_analyzer)
+    data: Tuple[pd.DataFrame, dict] = Depends(get_current_data)
 ) -> StatisticalLLMAgent:
-    """Get StatisticalLLMAgent instance with current data and analyzer."""
+    """Get StatisticalLLMAgent instance with current data."""
     df, _ = data
-    return StatisticalLLMAgent(df, analyzer)
+    return StatisticalLLMAgent({"main": df})
+
 
 
 def check_data_exists() -> bool:
