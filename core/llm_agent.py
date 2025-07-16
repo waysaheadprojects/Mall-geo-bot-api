@@ -80,7 +80,7 @@ class StatisticalLLMAgent(LoggerMixin):
         basic_info = self.analyzer.get_basic_info()
         schema_overview = self.analyzer.get_schema_overview()
         
-        context = f"""
+        context = """
 Dataset Overview:
 - Total rows: {basic_info["total_rows"]:,}
 - Total columns: {basic_info["total_columns"]}
