@@ -1,9 +1,9 @@
 #!/usr/bin/env python
-"""LLM agent with PandasAI + SmartDatalake + pandasql, fixed for code-generation prompts."""
+"""LLM agent with PandasAI + SmartDatalake + pandasql, fully patched for code-gen pipeline."""
 
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Generator, Optional, Union
+from typing import Dict, List, Generator, Optional
 
 from openai import OpenAI
 from pandasql import sqldf
@@ -18,7 +18,7 @@ from pandasai.llm.base import LLM
 
 
 class OpenAILLM(LLM):
-    """OpenAI LLM wrapper that supports both string and prompt-like instructions."""
+    """OpenAI LLM wrapper that handles both string and prompt-object instructions."""
 
     def __init__(self, api_token: str, model: str = "gpt-4o", **kwargs):
         self.client = OpenAI(api_key=api_token)
@@ -26,14 +26,16 @@ class OpenAILLM(LLM):
         super().__init__(**kwargs)
 
     def call(self, instruction, value: str = "", suffix: str = "") -> str:
-        # Handle non-string prompts (e.g. GeneratePythonCodePrompt)
+        # Unified prompt extractor for objects and strings
         if not isinstance(instruction, str):
-            instruction_text = getattr(instruction, "prompt", str(instruction))
+            if hasattr(instruction, "prompt"):
+                text = instruction.prompt
+            else:
+                text = str(instruction)
         else:
-            instruction_text = instruction
+            text = instruction
 
-        prompt = "\n".join(filter(None, [instruction_text, value, suffix]))
-
+        prompt = "\n".join(filter(None, [text, value, suffix]))
         try:
             resp = self.client.chat.completions.create(
                 model=self.model,
@@ -51,17 +53,14 @@ class OpenAILLM(LLM):
 
 
 class StatisticalLLMAgent(LoggerMixin):
-    """
-    Agent for statistical and SQL queries across multiple DataFrames, with streaming and full pipeline support.
-    """
+    """Advanced agent for natural language & SQL queries over multiple DataFrames."""
 
     def __init__(self, dataframes: Dict[str, pd.DataFrame]):
         self.dataframes = dataframes
-        self.analyzers = {name: StatisticalAnalyzer(df) for name, df in dataframes.items()}
+        self.analyzers = {n: StatisticalAnalyzer(df) for n, df in dataframes.items()}
         self.llm = OpenAILLM(api_token=settings.openai_api_key)
 
-        # SmartDatalake for multi-DataFrame conversational querying
-        self.smart_lake = SmartDatalake(list(dataframes.values()), config={
+        self.smart_lake = SmartDatalake(list(self.dataframes.values()), config={
             "llm": self.llm,
             "enable_cache": True,
             "use_error_correction_framework": True,
@@ -86,7 +85,7 @@ class StatisticalLLMAgent(LoggerMixin):
             if sql_mode:
                 df = self._run_sql(query)
                 yield from self._stream_df(df)
-                response = f"SQL returned {len(df)} rows."
+                response = f"SQL returned {len(df)} row(s)."
             else:
                 response = self._chat_query(query, df_name)
                 yield response
@@ -108,7 +107,7 @@ class StatisticalLLMAgent(LoggerMixin):
         if df_name:
             if df_name not in self.dataframes:
                 raise ValueError(f"No DataFrame named '{df_name}'.")
-            return self.smart_lake.chat(f"Using '{df_name}': {query}")
+            return self.smart_lake.chat(f"Using '{df_name}' dataset: {query}")
         return self.smart_lake.chat(query)
 
     def _stream_df(self, df: pd.DataFrame) -> Generator[str, None, None]:
@@ -120,7 +119,7 @@ class StatisticalLLMAgent(LoggerMixin):
 
     def merge_dataframes(self, df1: str, df2: str, on: List[str], how: str = 'inner') -> pd.DataFrame:
         if df1 not in self.dataframes or df2 not in self.dataframes:
-            raise ValueError(f"One or both dataframes '{df1}', '{df2}' not found.")
+            raise ValueError(f"One or both DataFrames '{df1}', '{df2}' not found.")
         merged = pd.merge(self.dataframes[df1], self.dataframes[df2], on=on, how=how)
         self.log_operation("merge", left=df1, right=df2, on=on, how=how, rows=len(merged))
         return merged
@@ -134,7 +133,7 @@ class StatisticalLLMAgent(LoggerMixin):
             "Show top 5 rows of the dataset.",
             "What is the mean and std of a numeric column?",
             "Plot histogram of a numeric column.",
-            "Join two tables on a key, using SQL mode."
+            "Join two tables on a key using SQL mode."
         ]
         if analyzer.numeric_columns:
             col = analyzer.numeric_columns[0]
