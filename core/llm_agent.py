@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""LLM agent for advanced statistical & relational query processing using PandasAI, SmartDatalake, and pandasql."""
+"""LLM agent with PandasAI + SmartDatalake + pandasql, fixed for code-generation prompts."""
 
 import pandas as pd
 import numpy as np
@@ -13,19 +13,27 @@ from core.statistical_analyzer import StatisticalAnalyzer
 from utils.exceptions import LLMError
 from utils.logging import LoggerMixin
 
-from pandasai import SmartDatalake  # supports conversational queries across multiple DataFrames
+from pandasai import SmartDatalake
 from pandasai.llm.base import LLM
 
 
 class OpenAILLM(LLM):
-    """OpenAI LLM wrapper for use in PandasAI."""
+    """OpenAI LLM wrapper that supports both string and prompt-like instructions."""
+
     def __init__(self, api_token: str, model: str = "gpt-4o", **kwargs):
         self.client = OpenAI(api_key=api_token)
         self.model = model
         super().__init__(**kwargs)
 
-    def call(self, instruction: str, value: str = "", suffix: str = "") -> str:
-        prompt = "\n".join(filter(None, [instruction, value, suffix]))
+    def call(self, instruction, value: str = "", suffix: str = "") -> str:
+        # Handle non-string prompts (e.g. GeneratePythonCodePrompt)
+        if not isinstance(instruction, str):
+            instruction_text = getattr(instruction, "prompt", str(instruction))
+        else:
+            instruction_text = instruction
+
+        prompt = "\n".join(filter(None, [instruction_text, value, suffix]))
+
         try:
             resp = self.client.chat.completions.create(
                 model=self.model,
@@ -35,7 +43,7 @@ class OpenAILLM(LLM):
             )
             return resp.choices[0].message.content
         except Exception as e:
-            raise LLMError(f"OpenAI call failed: {e}")
+            raise LLMError(f"OpenAI API call failed: {e}")
 
     @property
     def type(self) -> str:
@@ -43,15 +51,17 @@ class OpenAILLM(LLM):
 
 
 class StatisticalLLMAgent(LoggerMixin):
-    """Statistical Agent supporting multi-DataFrame natural language and SQL queries."""
+    """
+    Agent for statistical and SQL queries across multiple DataFrames, with streaming and full pipeline support.
+    """
 
     def __init__(self, dataframes: Dict[str, pd.DataFrame]):
         self.dataframes = dataframes
         self.analyzers = {name: StatisticalAnalyzer(df) for name, df in dataframes.items()}
         self.llm = OpenAILLM(api_token=settings.openai_api_key)
 
-        # Initialize SmartDatalake for multi-DataFrame conversational intelligence
-        self.smart_lake = SmartDatalake(list(self.dataframes.values()), config={
+        # SmartDatalake for multi-DataFrame conversational querying
+        self.smart_lake = SmartDatalake(list(dataframes.values()), config={
             "llm": self.llm,
             "enable_cache": True,
             "use_error_correction_framework": True,
@@ -63,11 +73,12 @@ class StatisticalLLMAgent(LoggerMixin):
         self.history: List[Dict[str, str]] = []
         self.log_operation("initialized", datasets=list(self.dataframes.keys()))
 
-    def process_query(self, 
-                      query: str, 
-                      df_name: Optional[str] = None, 
-                      sql_mode: bool = False
-                      ) -> Generator[str, None, None]:
+    def process_query(
+        self,
+        query: str,
+        df_name: Optional[str] = None,
+        sql_mode: bool = False
+    ) -> Generator[str, None, None]:
         self.log_operation("process_query", query=query, df=df_name or "[all]", sql_mode=sql_mode)
         self.history.append({"role": "user", "content": query})
 
@@ -75,6 +86,7 @@ class StatisticalLLMAgent(LoggerMixin):
             if sql_mode:
                 df = self._run_sql(query)
                 yield from self._stream_df(df)
+                response = f"SQL returned {len(df)} rows."
             else:
                 response = self._chat_query(query, df_name)
                 yield response
@@ -97,12 +109,11 @@ class StatisticalLLMAgent(LoggerMixin):
             if df_name not in self.dataframes:
                 raise ValueError(f"No DataFrame named '{df_name}'.")
             return self.smart_lake.chat(f"Using '{df_name}': {query}")
-        else:
-            return self.smart_lake.chat(query)
+        return self.smart_lake.chat(query)
 
     def _stream_df(self, df: pd.DataFrame) -> Generator[str, None, None]:
         if df.empty:
-            yield "ℹ️ Query returned no results."
+            yield "ℹ️ SQL query returned no results."
         else:
             for row in df.head(10).to_dict(orient="records"):
                 yield str(row)
@@ -120,15 +131,15 @@ class StatisticalLLMAgent(LoggerMixin):
     def suggest_questions(self, df_name: Optional[str] = None) -> List[str]:
         analyzer = self.analyzers.get(df_name, next(iter(self.analyzers.values())))
         suggestions = [
-            "What are the top 5 entries by a numeric column?",
-            "Show distribution of a numeric column.",
-            "Perform a join with another dataframe.",
-            "Run SQL: SELECT column, COUNT(*) FROM df GROUP BY column"
+            "Show top 5 rows of the dataset.",
+            "What is the mean and std of a numeric column?",
+            "Plot histogram of a numeric column.",
+            "Join two tables on a key, using SQL mode."
         ]
         if analyzer.numeric_columns:
             col = analyzer.numeric_columns[0]
             suggestions += [
-                f"What is the mean and std deviation of {col}?",
+                f"What is the standard deviation of {col}?",
                 f"Plot histogram of {col}."
             ]
         return suggestions[:8]
