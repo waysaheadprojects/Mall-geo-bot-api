@@ -26,7 +26,7 @@ class OpenAILLM(LLM):
     
     def call(self, instruction: str, value: str = "", suffix: str = "") -> str:
         """Call the OpenAI API."""
-        prompt = f"{instruction}\n{value}\n{suffix}".strip()
+        prompt = "{instruction}\n{value}\n{suffix}".strip()
         
         try:
             response = self.client.chat.completions.create(
@@ -37,7 +37,7 @@ class OpenAILLM(LLM):
             )
             return response.choices[0].message.content
         except Exception as e:
-            raise LLMError(f"OpenAI API call failed: {str(e)}")
+            raise LLMError("OpenAI API call failed: {str(e)}")
     
     @property
     def type(self) -> str:
@@ -92,10 +92,10 @@ Column Details:
 """
         
         for col_info in schema_overview["columns"][:15]:  # Limit to first 15 columns
-            context += f"- {col_info[\"column\"]}: {col_info[\"dtype\"]}, {col_info[\"null_percentage\"]:.1f}% null, {col_info[\"unique_count\"]} unique values\n"
+            context += "- {col_info[\"column\"]}: {col_info[\"dtype\"]}, {col_info[\"null_percentage\"]:.1f}% null, {col_info[\"unique_count\"]} unique values\n"
         
         if len(schema_overview["columns"]) > 15:
-            context += f"... and {len(schema_overview[\"columns\"]) - 15} more columns\n"
+            context += "... and {len(schema_overview[\"columns\"]) - 15} more columns\n"
         
         return context
     
@@ -112,25 +112,25 @@ Column Details:
             
             # PandasAI can return various types, convert to HTML for consistent output where applicable
             if isinstance(pandasai_response, pd.DataFrame):
-                response_content = f"Here\'s the result:<br><br>{pandasai_response.to_html(index=False)}"
+                response_content = "Here\'s the result:<br><br>{pandasai_response.to_html(index=False)}"
             elif isinstance(pandasai_response, (int, float)):
-                response_content = f"The answer is: <b>{pandasai_response}</b>"
+                response_content = "The answer is: <b>{pandasai_response}</b>"
             elif isinstance(pandasai_response, str):
                 response_content = pandasai_response
             elif isinstance(pandasai_response, bool):
-                response_content = f"The answer is: <b>{pandasai_response}</b>"
+                response_content = "The answer is: <b>{pandasai_response}</b>"
             elif pandasai_response is None:
                 # Try to extract a direct answer using our statistical analyzer
                 if "average" in query.lower() and "salary" in query.lower():
                     avg_salary = self.analyzer.df[\'salary\'].mean()
-                    response_content = f"The average salary is: <b>${avg_salary:,.2f}</b>"
+                    response_content = "The average salary is: <b>${avg_salary:,.2f}</b>"
                 elif "mean" in query.lower() and "salary" in query.lower():
                     avg_salary = self.analyzer.df[\'salary\'].mean()
-                    response_content = f"The mean salary is: <b>${avg_salary:,.2f}</b>"
+                    response_content = "The mean salary is: <b>${avg_salary:,.2f}</b>"
                 else:
                     response_content = "I processed your request, but couldn\'t generate a specific answer. Please try rephrasing your question."
             else:
-                response_content = f"Result: {str(pandasai_response)}"
+                response_content = "Result: {str(pandasai_response)}"
             
             # Generate response using LLM (optional, for further interpretation)
             # For now, we\'ll just return the pandasai_response directly
@@ -148,8 +148,8 @@ Column Details:
                 self.conversation_history = self.conversation_history[-20:]
                 
         except Exception as e:
-            error_message = f"I encountered an error while analyzing your data with PandasAI: {str(e)}"
-            self.logger.error(f"Query processing failed with PandasAI: {str(e)}")
+            error_message = "I encountered an error while analyzing your data with PandasAI: {str(e)}"
+            self.logger.error("Query processing failed with PandasAI: {str(e)}")
             yield error_message
     
     def _stream_text(self, text: str, chunk_size: int = 50) -> Generator[str, None, None]:
@@ -182,13 +182,13 @@ Column Details:
         if self.analyzer.numeric_columns:
             col = self.analyzer.numeric_columns[0]
             suggestions.extend([
-                f"What is the mean and standard deviation of {col}?",
-                f"Are there outliers in {col}?",
-                f"What is the distribution of {col}?"
+                 "What is the mean and standard deviation of {col}?",
+                 "Are there outliers in {col}?",
+                 "What is the distribution of {col}?"
             ])
         
         if len(self.analyzer.numeric_columns) >= 2:
             col1, col2 = self.analyzer.numeric_columns[:2]
-            suggestions.append(f"Is there a correlation between {col1} and {col2}?")
+            suggestions.append("Is there a correlation between {col1} and {col2}?")
         
         return suggestions[:8]  # Return top 8 suggestions
