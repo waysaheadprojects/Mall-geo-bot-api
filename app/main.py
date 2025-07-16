@@ -23,8 +23,8 @@ app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
     description="A production-ready API for statistical analysis with LLM-powered natural language queries",
-    docs_url="/docs" if settings.debug else None,
-    redoc_url="/redoc" if settings.debug else None,
+    docs_url="/docs" ,
+    redoc_url="/redoc",
     openapi_url="/openapi.json" if settings.debug else None
 )
 
