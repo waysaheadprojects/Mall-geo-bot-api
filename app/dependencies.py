@@ -41,11 +41,13 @@ def get_statistical_analyzer(data: Tuple[pd.DataFrame, dict] = Depends(get_curre
 
 
 def get_llm_agent(
-    data: Tuple[pd.DataFrame, dict] = Depends(get_current_data)
+    data: Tuple[pd.DataFrame, dict] = Depends(get_current_data),
+    analyzer: StatisticalAnalyzer = Depends(get_statistical_analyzer)
 ) -> StatisticalLLMAgent:
-    """Get StatisticalLLMAgent instance with current data."""
+    """Get StatisticalLLMAgent instance with current data and analyzer."""
     df, _ = data
-    return StatisticalLLMAgent({"main": df})
+    return StatisticalLLMAgent(df, analyzer)
+
 
 
 
