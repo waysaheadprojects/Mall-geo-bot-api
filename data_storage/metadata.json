@@ -1,0 +1,64 @@
+{
+  "upload_time": 1752646132.162714,
+  "file_names": [
+    "test_data.csv"
+  ],
+  "total_rows": 10,
+  "total_columns": 6,
+  "quality_report": {
+    "total_rows": 10,
+    "total_columns": 6,
+    "missing_data_percentage": 0.0,
+    "duplicate_rows": 0,
+    "columns_with_missing_data": [],
+    "columns_all_missing": [],
+    "numeric_columns_count": 3,
+    "categorical_columns_count": 2,
+    "memory_usage_mb": 0.0014162063598632812
+  },
+  "column_info": {
+    "total_columns": 6,
+    "numeric_columns": [
+      "age",
+      "salary",
+      "years_experience"
+    ],
+    "categorical_columns": [
+      "department",
+      "__source_file__"
+    ],
+    "datetime_columns": [],
+    "text_columns": [
+      "name"
+    ],
+    "column_types": {
+      "name": "string",
+      "age": "int64",
+      "salary": "int64",
+      "department": "category",
+      "years_experience": "int64",
+      "__source_file__": "category"
+    },
+    "missing_values": {
+      "name": 0,
+      "age": 0,
+      "salary": 0,
+      "department": 0,
+      "years_experience": 0,
+      "__source_file__": 0
+    },
+    "unique_counts": {
+      "name": 10,
+      "age": 10,
+      "salary": 10,
+      "department": 3,
+      "years_experience": 8,
+      "__source_file__": 1
+    }
+  },
+  "saved_at": "2025-07-16T02:08:52.162798",
+  "data_shape": [
+    10,
+    6
+  ]
+}
