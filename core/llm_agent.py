@@ -15,7 +15,7 @@ from pandasql import sqldf
 class OpenAILLM(LLM):
     """Custom OpenAI LLM wrapper for PandasAI."""
 
-    def __init__(self, api_token: str, model: str = "gpt-4.1-nano", **kwargs):
+    def __init__(self, api_token: str, model: str = "gpt-4o", **kwargs):
         self.api_token = api_token
         self.model = model
         self.client = OpenAI(api_key=api_token)
@@ -43,29 +43,30 @@ class OpenAILLM(LLM):
 class StatisticalLLMAgent(LoggerMixin):
     """Advanced LLM-powered agent for statistical and relational data analysis using multiple DataFrames."""
 
-    def __init__(self, dataframes: Dict[str, pd.DataFrame], analyzers: Dict[str, StatisticalAnalyzer]):
+    def __init__(self, dataframes: Dict[str, pd.DataFrame]):
         self.dataframes = dataframes
-        self.analyzers = analyzers
+        self.analyzers = {name: StatisticalAnalyzer(df) for name, df in dataframes.items()}
         self.client = self._initialize_openai_client()
         self.conversation_history = []
 
+        self.pandas_ai_llm = OpenAILLM(api_token=settings.openai_api_key)
         self.smart_dataframes = {
             name: SmartDataframe(
                 df,
                 config={
-                    "llm": OpenAILLM(api_token=settings.openai_api_key),
+                    "llm": self.pandas_ai_llm,
                     "enable_cache": True,
                     "use_error_correction_framework": True,
                     "conversational": False,
                     "save_charts": True,
                     "verbose": True,
-                    "custom_head": self._generate_dataset_context(analyzers[name])
+                    "custom_head": self._generate_dataset_context(name, self.analyzers[name])
                 },
             )
             for name, df in dataframes.items()
         }
 
-        for name, analyzer in analyzers.items():
+        for name, analyzer in self.analyzers.items():
             self.log_operation(
                 "initialized",
                 dataset=name,
@@ -80,7 +81,7 @@ class StatisticalLLMAgent(LoggerMixin):
             raise LLMError("OpenAI API key not configured")
         return OpenAI(api_key=settings.openai_api_key)
 
-    def _generate_dataset_context(self, analyzer: StatisticalAnalyzer) -> str:
+    def _generate_dataset_context(self, name: str, analyzer: StatisticalAnalyzer) -> str:
         try:
             basic_info = analyzer.get_basic_info()
             schema_overview = analyzer.get_schema_overview()
@@ -148,6 +149,33 @@ class StatisticalLLMAgent(LoggerMixin):
     def clear_conversation_history(self) -> None:
         self.conversation_history = []
         self.log_operation("clear_conversation_history")
+
+    def add_dataframe(self, name: str, df: pd.DataFrame):
+        self.dataframes[name] = df
+        self.analyzers[name] = StatisticalAnalyzer(df)
+        self.smart_dataframes[name] = SmartDataframe(df, config={"llm": self.pandas_ai_llm, "enable_cache": False})
+        self.log_operation("add_dataframe", name=name, rows=len(df), columns=len(df.columns))
+
+    def remove_dataframe(self, name: str):
+        if name in self.dataframes:
+            del self.dataframes[name]
+            del self.analyzers[name]
+            del self.smart_dataframes[name]
+            self.log_operation("remove_dataframe", name=name)
+
+    def merge_dataframes(self, df1_name: str, df2_name: str, on_columns: List[str], how: str = 'inner') -> Optional[pd.DataFrame]:
+        if df1_name not in self.dataframes or df2_name not in self.dataframes:
+            raise ValueError(f"Both dataframes '{df1_name}' and '{df2_name}' must exist to perform a merge.")
+
+        df1 = self.dataframes[df1_name]
+        df2 = self.dataframes[df2_name]
+
+        try:
+            merged_df = pd.merge(df1, df2, on=on_columns, how=how)
+            self.log_operation("merge_dataframes", df1=df1_name, df2=df2_name, on=on_columns, how=how, merged_rows=len(merged_df))
+            return merged_df
+        except Exception as e:
+            raise RuntimeError(f"Error merging dataframes: {e}")
 
     def suggest_questions(self, df_name: Optional[str] = None) -> List[str]:
         if df_name and df_name in self.analyzers:
