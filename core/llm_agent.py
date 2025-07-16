@@ -133,7 +133,7 @@ class StatisticalLLMAgent(LoggerMixin):
 
     def _process_across_dataframes(self, query: str) -> Union[str, pd.DataFrame]:
         context = "\n\n".join([
-            f"Dataset: {name}\n{self._generate_dataset_context(analyzer)}"
+            f"Dataset: {name}\n{self._generate_dataset_context(name, analyzer)}"
             for name, analyzer in self.analyzers.items()
         ])
         instruction = f"You have multiple datasets. {context}\n\nBased on this context, answer: {query}"
