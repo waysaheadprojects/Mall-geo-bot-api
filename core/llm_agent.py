@@ -53,7 +53,11 @@ class StatisticalLLMAgent(LoggerMixin):
         self.conversation_history = []
 
         self.pandas_ai_llm = OpenAILLM(api_token=settings.openai_api_key)
-        self.smart_dataframe = SmartDataframe(df, config={"llm": self.pandas_ai_llm, "enable_cache": False, "save_charts": True})
+        self.smart_dataframe = SmartDataframe(df, config={
+            "llm": self.pandas_ai_llm,
+            "enable_cache": False,
+            "save_charts": True
+        })
 
         self.dataset_context = self._generate_dataset_context()
 
@@ -106,7 +110,9 @@ Column Details:
                 response_content = f"The answer is: <b>{pandasai_response}</b>"
             elif isinstance(pandasai_response, str):
                 if pandasai_response.strip().endswith(".png") and os.path.exists(pandasai_response):
-                    response_content = f'<img src="{pandasai_response}" alt="Generated Chart" style="max-width:100%;">'
+                    relative_path = os.path.relpath(pandasai_response, start=os.getcwd())
+                    public_url = f"https://mallgpt.waysaheadglobal.com/{relative_path.replace(os.sep, '/')}"
+                    response_content = f'<img src="{public_url}" alt="Generated Chart" style="max-width:100%;">'
                 else:
                     response_content = pandasai_response
             elif pandasai_response is None:
