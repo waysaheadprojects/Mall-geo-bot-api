@@ -55,6 +55,8 @@ class StatisticalLLMAgent(LoggerMixin):
         
         # Initialize PandasAI SmartDataframe
         self.pandas_ai_llm = OpenAILLM(api_token=settings.openai_api_key)
+        # PandasAI is designed to automatically recognize records and handle various data qualities.
+        # It also interprets natural language queries, including those implying 'like' functionality.
         self.smart_dataframe = SmartDataframe(df, config={"llm": self.pandas_ai_llm, "enable_cache": False})
         
         # Generate dataset context
@@ -82,18 +84,18 @@ class StatisticalLLMAgent(LoggerMixin):
 Dataset Overview:
 - Total rows: {basic_info["total_rows"]:,}
 - Total columns: {basic_info["total_columns"]}
-- Numeric columns: {len(self.analyzer.numeric_columns)} ({', '.join(self.analyzer.numeric_columns[:10])})
-- Categorical columns: {len(self.analyzer.categorical_columns)} ({', '.join(self.analyzer.categorical_columns[:10])})
+- Numeric columns: {len(self.analyzer.numeric_columns)} ({\', \'.join(self.analyzer.numeric_columns[:10])})
+- Categorical columns: {len(self.analyzer.categorical_columns)} ({\', \'.join(self.analyzer.categorical_columns[:10])})
 - Missing values: {basic_info["missing_values"]:,}
 
 Column Details:
 """
         
         for col_info in schema_overview["columns"][:15]:  # Limit to first 15 columns
-            context += f"- {col_info['column']}: {col_info['dtype']}, {col_info['null_percentage']:.1f}% null, {col_info['unique_count']} unique values\n"
+            context += f"- {col_info[\"column\"]}: {col_info[\"dtype\"]}, {col_info[\"null_percentage\"]:.1f}% null, {col_info[\"unique_count\"]} unique values\n"
         
         if len(schema_overview["columns"]) > 15:
-            context += f"... and {len(schema_overview['columns']) - 15} more columns\n"
+            context += f"... and {len(schema_overview[\"columns\"]) - 15} more columns\n"
         
         return context
     
@@ -108,30 +110,30 @@ Column Details:
             # Use PandasAI to process the query
             pandasai_response = self.smart_dataframe.chat(query)
             
-            # PandasAI can return various types, convert to string for consistent output
+            # PandasAI can return various types, convert to HTML for consistent output where applicable
             if isinstance(pandasai_response, pd.DataFrame):
-                response_content = f"Here's the result:\n\n{pandasai_response.to_string(index=False)}"
+                response_content = f"Here\'s the result:<br><br>{pandasai_response.to_html(index=False)}"
             elif isinstance(pandasai_response, (int, float)):
-                response_content = f"The answer is: {pandasai_response}"
+                response_content = f"The answer is: <b>{pandasai_response}</b>"
             elif isinstance(pandasai_response, str):
                 response_content = pandasai_response
             elif isinstance(pandasai_response, bool):
-                response_content = f"The answer is: {pandasai_response}"
+                response_content = f"The answer is: <b>{pandasai_response}</b>"
             elif pandasai_response is None:
                 # Try to extract a direct answer using our statistical analyzer
                 if "average" in query.lower() and "salary" in query.lower():
-                    avg_salary = self.analyzer.df['salary'].mean()
-                    response_content = f"The average salary is: ${avg_salary:,.2f}"
+                    avg_salary = self.analyzer.df[\'salary\'].mean()
+                    response_content = f"The average salary is: <b>${avg_salary:,.2f}</b>"
                 elif "mean" in query.lower() and "salary" in query.lower():
-                    avg_salary = self.analyzer.df['salary'].mean()
-                    response_content = f"The mean salary is: ${avg_salary:,.2f}"
+                    avg_salary = self.analyzer.df[\'salary\'].mean()
+                    response_content = f"The mean salary is: <b>${avg_salary:,.2f}</b>"
                 else:
-                    response_content = "I processed your request, but couldn't generate a specific answer. Please try rephrasing your question."
+                    response_content = "I processed your request, but couldn\'t generate a specific answer. Please try rephrasing your question."
             else:
                 response_content = f"Result: {str(pandasai_response)}"
             
             # Generate response using LLM (optional, for further interpretation)
-            # For now, we'll just return the pandasai_response directly
+            # For now, we\'ll just return the pandasai_response directly
             full_response = response_content
             
             # Yield the response in chunks for streaming effect
@@ -167,15 +169,14 @@ Column Details:
     def suggest_questions(self) -> List[str]:
         """Suggest relevant questions based on the dataset."""
         suggestions = [
-            "What are the average values for each numeric column?",
-            "Show me the correlation matrix.",
-            "Find outliers in the 'salary' column.",
-            "What is the distribution of 'age'?",
-            "Summarize the dataset.",
-            "How many unique values are in the 'department' column?",
-            "What is the total salary for each department?",
-            "Compare the average age of employees in 'Engineering' and 'Marketing'."
+            "Which brands or tenants have the largest retail footprint (deal size in sft) in Inorbit Mall Hyderabad?",
+            "What is the distribution of deal sizes (in square feet) for retail spaces in Inorbit Mall Hyderabad?",
+            "How many retail units are currently occupied versus vacant in Inorbit Mall Hyderabad?",
+            "What is the average number of seats available in retail units within Inorbit Mall Hyderabad?",
+            "What is the breakdown of deal types (e.g., new lease, renewal) within Inorbit Mall Hyderabad?"
         ]
+        return suggestions
+
         
         # Add column-specific suggestions if available
         if self.analyzer.numeric_columns:
@@ -191,6 +192,3 @@ Column Details:
             suggestions.append(f"Is there a correlation between {col1} and {col2}?")
         
         return suggestions[:8]  # Return top 8 suggestions
-
-
-
