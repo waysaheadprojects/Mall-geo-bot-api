@@ -13,6 +13,9 @@ from app.api.endpoints import data, analysis, chat
 from app.api.models.responses import HealthResponse, ErrorResponse, StatusEnum
 from utils.logging import setup_logging, get_logger
 from utils.exceptions import StatisticalBotException
+from fastapi.staticfiles import StaticFiles
+import os
+
 
 # Setup logging
 setup_logging()
@@ -36,6 +39,11 @@ app.add_middleware(
     allow_methods=settings.cors_methods,
     allow_headers=settings.cors_headers,
 )
+
+# Mount the 'exports' directory to serve static files publicly
+exports_path = os.path.join(os.getcwd(), "exports")
+app.mount("/exports", StaticFiles(directory=exports_path), name="exports")
+
 
 # Global exception handler for custom exceptions
 @app.exception_handler(StatisticalBotException)
