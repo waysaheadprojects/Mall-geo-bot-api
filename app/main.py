@@ -23,9 +23,9 @@ app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
     description="A production-ready API for statistical analysis with LLM-powered natural language queries",
-    docs_url="/docs" ,
+    docs_url="/docs",
     redoc_url="/redoc",
-    openapi_url="/openapi.json" if settings.debug else None
+    openapi_url="/openapi.json"  # <--- force enabled regardless of debug
 )
 
 # Add CORS middleware
