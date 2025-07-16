@@ -111,8 +111,8 @@ Column Details:
             elif isinstance(pandasai_response, str):
                 if pandasai_response.strip().endswith(".png") and os.path.exists(pandasai_response):
                     relative_path = os.path.relpath(pandasai_response, start=os.getcwd())
-                    public_url = f"https://mallgpt.waysaheadglobal.com/{relative_path.replace(os.sep, '/')}"
-                    response_content = f'<img src="{public_url}" alt="Generated Chart" style="max-width:100%;">'
+                    public_url = f'https://mallgpt.waysaheadglobal.com/{relative_path.replace(os.sep, "/").strip()}'
+                    response_content = f'<img src={public_url} alt=GeneratedChart style=max-width:100%;>'
                 else:
                     response_content = pandasai_response
             elif pandasai_response is None:
