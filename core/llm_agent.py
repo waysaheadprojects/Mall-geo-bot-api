@@ -13,7 +13,6 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from openai import OpenAI, APIError
 from RestrictedPython import compile_restricted, safe_globals
-# --- FIX: Import the necessary default guards ---
 from RestrictedPython.Guards import safer_getattr, full_write_guard, guarded_iter_unpack_sequence, guarded_unpack_sequence
 from RestrictedPython.Eval import default_guarded_getitem, default_guarded_getiter
 
@@ -28,11 +27,6 @@ class LLMError(Exception):
     pass
 
 class StatisticalLLMAgent:
-    """
-    An intelligent agent that answers questions about a DataFrame by generating and safely
-    executing Python code, inspired by the SafeCodeAgent architecture. It includes
-    planning, self-correction, and summarization steps.
-    """
     def __init__(self, df: pd.DataFrame, analyzer=None):
         self._setup_openai_client()
         self.df = self._prepare_dataframe(df)
@@ -58,21 +52,15 @@ class StatisticalLLMAgent:
         return df
 
     def _create_safe_globals(self) -> Dict[str, Any]:
-        """Creates a dictionary of globals safe for use in restricted code execution."""
         restricted_globals = safe_globals.copy()
-        # --- FIX STARTS HERE: Add all required guards for safe execution ---
         restricted_globals.update({
-            "_getattr_": safer_getattr,
-            "_write_": full_write_guard,
-            "_getitem_": default_guarded_getitem,
-            "_getiter_": default_guarded_getiter,
+            "_getattr_": safer_getattr, "_write_": full_write_guard,
+            "_getitem_": default_guarded_getitem, "_getiter_": default_guarded_getiter,
             "_iter_unpack_sequence_": guarded_iter_unpack_sequence,
             "_unpack_sequence_": guarded_unpack_sequence,
-            # Also include the libraries and data
             "pd": pd, "np": np, "plt": plt, "sns": sns,
             "df": self.df, "save_chart": self._make_save_chart_function()
         })
-        # --- FIX ENDS HERE ---
         return restricted_globals
 
     def _make_save_chart_function(self):
@@ -106,24 +94,25 @@ class StatisticalLLMAgent:
 
     def _get_analysis_plan(self, query: str) -> str:
         prompt = """
-You are an expert data analysis planner...
+You are an expert data analysis planner. Your task is to create a concise, step-by-step plan to answer a user's question.
 **DataFrame Information:**
 {self.df_info}
 **User Question:** "{query}"
 **Instructions:**
-Provide a clear, one-line plan...
+Provide a clear, one-line plan. Be smart about it. If the user asks for "first floor", your plan should involve checking for multiple variations like "1", "First", "1st", etc.
+Example Plan: "Filter the DataFrame for rows where `complex` is 'Inorbit Mall (Hyderabad)' and `floor` is in a list of first-floor values, then extract the unique brand names."
 """
         return self._call_openai_api(prompt)
 
     def _get_corrected_plan(self, original_plan: str, error_message: str) -> str:
         logger.info("Revisiting the plan due to a data or plan error...")
         prompt = f"""
-You are an expert data analysis plan corrector...
+You are an expert data analysis plan corrector. A plan failed to execute. Your task is to create a new, safer plan.
 **Original Plan:** {original_plan}
 **Execution Error:** {error_message}
 **Available DataFrame Columns:** {self.actual_columns}
 **Instructions:**
-Analyze the error...
+Analyze the error. If it's a `ValueError` or `TypeError`, the data in a column is likely dirty. The new plan MUST focus on cleaning that column. If it's a `KeyError`, a column name is wrong. Correct the plan to use a valid column name. Provide only the new, single-line plan.
 """
         corrected_plan = self._call_openai_api(prompt)
         logger.info(f"✅ Corrected Plan: {corrected_plan}")
@@ -133,12 +122,28 @@ Analyze the error...
         current_plan = plan
         for attempt in range(max_retries):
             logger.info(f"Step 2: Generating Python code (Attempt {attempt + 1}/{max_retries})...")
+            
+            # --- FIX STARTS HERE: Added self.df_info to the prompt ---
             prompt = f"""
-You are an expert Python code generator...
+You are an expert Python code generator for data analysis. Your task is to write Python code to accomplish the goal described in the plan.
+
+**DataFrame Information:**
+{self.df_info}
+
 **Plan to Execute:** {current_plan}
+
 **Instructions:**
-- Write standard Python code...
+- Write standard Python code using pandas. The DataFrame is available as `df`.
+- **HANDLE MESSY DATA:** The `floor` column might contain comma-separated values like "Ground,1,2". To check if "1" is on that floor, you must use `str.contains('1')`. A simple `==` check will fail.
+- **CRITICAL SAFETY RULE:** You **MUST NOT** modify the `df` DataFrame.
+- **RESULT FORMAT:** The final output **MUST** be a dictionary named `result`.
+    - For a DataFrame/Series, use key 'df'. Example: `result = {{'df': my_dataframe}}`.
+    - For a single value, use key 'text'. Example: `result = {{'text': f'The answer is {{my_value}}'}}`.
+    - For a chart, use key 'chart_path'. Example: `result = {{'chart_path': save_chart(plt)}}`.
+- **DO NOT** include any `import` statements or conversational text. Only provide the raw Python code.
 """
+            # --- FIX ENDS HERE ---
+
             code = self._call_openai_api(prompt)
             cleaned_code = re.sub(r"^```(?:python)?\n|\n```$", "", code, flags=re.MULTILINE).strip()
             logger.info(f"--- Generated Code ---\n{cleaned_code}\n----------------------")
@@ -154,7 +159,7 @@ You are an expert Python code generator...
                 error_str = f"{type(e).__name__}: {e}"
                 logger.error(f"❌ Execution failed: {error_str}")
                 
-                if isinstance(e, (KeyError, ValueError, TypeError)) and attempt < max_retries - 1:
+                if isinstance(e, (KeyError, ValueError, TypeError, SyntaxError)) and attempt < max_retries - 1:
                     current_plan = self._get_corrected_plan(current_plan, error_str)
                     continue
                 else:
@@ -179,13 +184,13 @@ You are an expert Python code generator...
             output_html = f"<img src='/{relative_path}' alt='Generated Chart' style='max-width:100%; height:auto;'/>"
 
         summary_prompt = """
-You are a business analyst...
+You are a business analyst. Your goal is to provide a clear, concise summary of a data analysis result for a non-technical audience.
 **Original User Question:** "{query}"
 **Final Analysis Plan:** "{plan}"
 **Result Data (HTML format):**
 {output_html}
 **Instructions:**
-Start with a direct answer...
+Start with a direct answer to the user's question. If there is a table, mention what it contains. If the result is text, summarize its findings. If the result is empty or NaN, state that the requested data could not be found. Keep the summary professional.
 """
         summary = self._call_openai_api(summary_prompt, temperature=0.3)
         
