@@ -1,11 +1,10 @@
 import os
-import uuid
+import json
 import logging
 import re
-import argparse
-from typing import Generator, Dict, Any, Union, List
+import uuid
+from typing import Generator, Dict, Any, List, Union
 
-# Third-party libraries
 import pandas as pd
 import numpy as np
 import matplotlib
@@ -27,11 +26,14 @@ class LLMError(Exception):
     pass
 
 class StatisticalLLMAgent:
+    """
+    An intelligent agent that answers questions about a DataFrame by generating and safely executing
+    Python code. This version uses a more direct, streamlined architecture to ensure reliability.
+    """
     def __init__(self, df: pd.DataFrame, analyzer=None):
         self._setup_openai_client()
         self.df = self._prepare_dataframe(df)
-        self.actual_columns = self.df.columns.tolist()
-        self.df_info = self._generate_df_info()
+        self.dataset_context = self._generate_dataset_context()
         self._globals = self._create_safe_globals()
         self.conversation_history: List[Dict[str, str]] = []
 
@@ -44,24 +46,13 @@ class StatisticalLLMAgent:
     def _prepare_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
         sanitized_columns = {col: re.sub(r'[^0-9a-zA-Z_]+', '_', col) for col in df.columns}
         df = df.rename(columns=sanitized_columns)
-        logger.info(f"Original columns renamed for easier access: {sanitized_columns}")
+        logger.info("DataFrame columns sanitized.")
         numeric_cols_to_clean = ['current_rent_chargeable_inr_per_sft', 'chargeable_area_sft']
         for col in numeric_cols_to_clean:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
+                logger.info(f"Cleaned numeric column: '{col}'")
         return df
-
-    def _create_safe_globals(self) -> Dict[str, Any]:
-        restricted_globals = safe_globals.copy()
-        restricted_globals.update({
-            "_getattr_": safer_getattr, "_write_": full_write_guard,
-            "_getitem_": default_guarded_getitem, "_getiter_": default_guarded_getiter,
-            "_iter_unpack_sequence_": guarded_iter_unpack_sequence,
-            "_unpack_sequence_": guarded_unpack_sequence,
-            "pd": pd, "np": np, "plt": plt, "sns": sns,
-            "df": self.df, "save_chart": self._make_save_chart_function()
-        })
-        return restricted_globals
 
     def _make_save_chart_function(self):
         def save_chart(plt_obj: matplotlib.pyplot) -> str:
@@ -75,163 +66,173 @@ class StatisticalLLMAgent:
             return path
         return save_chart
 
-    def _generate_df_info(self) -> str:
-        info_str = "DataFrame Columns and Data Types:\n"
-        for col in self.df.columns:
-            info_str += f"- `{col}`: {self.df[col].dtype}\n"
-        info_str += "\nSample Data (first 3 rows):\n" + self.df.head(3).to_markdown(index=False)
-        return info_str
+    def _create_safe_globals(self) -> Dict[str, Any]:
+        restricted_globals = safe_globals.copy()
+        restricted_globals.update({
+            "_getattr_": safer_getattr, "_write_": full_write_guard,
+            "_getitem_": default_guarded_getitem, "_getiter_": default_guarded_getiter,
+            "_iter_unpack_sequence_": guarded_iter_unpack_sequence, "_unpack_sequence_": guarded_unpack_sequence,
+            "pd": pd, "np": np, "plt": plt, "sns": sns,
+            "df": self.df, "save_chart": self._make_save_chart_function()
+        })
+        return restricted_globals
 
-    def _call_openai_api(self, prompt: str, model: str = "gpt-4o", temperature: float = 0.0) -> str:
+    def _generate_dataset_context(self) -> str:
+        numeric_cols = self.df.select_dtypes(include=np.number).columns.tolist()
+        categorical_cols = self.df.select_dtypes(include=['object', 'category']).columns.tolist()
+        context = f"""
+Dataset Overview:
+- Total rows: {len(self.df):,}
+- Total columns: {len(self.df.columns)}
+- Numeric columns: {len(numeric_cols)} ({', '.join(numeric_cols[:5])}...)
+- Categorical columns: {len(categorical_cols)} ({', '.join(categorical_cols[:5])}...)
+Column Details (first 15):
+"""
+        for col, dtype in self.df.dtypes.head(15).items():
+            null_pct = self.df[col].isnull().mean() * 100
+            unique_count = self.df[col].nunique()
+            context += f"- {col}: {dtype}, {null_pct:.1f}% null, {unique_count} unique values\n"
+        return context
+
+    def _call_openai_api(self, prompt: str, model: str = "gpt-4o", temperature: float = 0.0, json_mode: bool = False) -> str:
         try:
-            response = self.client.chat.completions.create(
-                model=model, messages=[{"role": "user", "content": prompt}], temperature=temperature
-            )
+            kwargs = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": temperature}
+            if json_mode:
+                kwargs["response_format"] = {"type": "json_object"}
+            response = self.client.chat.completions.create(**kwargs)
             return response.choices[0].message.content.strip()
         except APIError as e:
-            logger.error(f"OpenAI API error: {e}")
+            logger.error(f"OpenAI API call failed: {e}")
             raise LLMError(f"OpenAI API call failed: {str(e)}")
 
-    def _get_analysis_plan(self, query: str) -> str:
+    def _get_intent(self, query: str) -> Dict[str, Any]:
+        """Checks if the query is clear or ambiguous, defaulting to clear."""
+        default_intent = {"type": "clear_query"}
+        intent_prompt = """
+Analyze the user's query to determine if it is clear enough to be answered or if it is ambiguous.
+Respond in JSON format.
+- If clear, return: {{"type": "clear_query"}}
+- If ambiguous, return: {{"type": "clarification", "question": "Your clarifying question."}}
+User Query: "{query}"
+"""
+        try:
+            response_str = self._call_openai_api(intent_prompt, temperature=0.0, json_mode=True)
+            intent = json.loads(response_str)
+            if 'type' in intent and intent['type'] in ['clear_query', 'clarification']:
+                return intent
+            return default_intent
+        except (json.JSONDecodeError, LLMError, Exception) as e:
+            logger.warning(f"Intent check failed: {e}. Defaulting to clear query.")
+            return default_intent
+
+    def _generate_and_execute_code(self, query: str) -> Union[Dict[str, Any], None]:
+        """Generates and safely executes Python code directly from the user query."""
+        logger.info("Step 2: Generating Python code...")
         prompt = """
-You are an expert data analysis planner. Your task is to create a concise, step-by-step plan to answer a user's question.
+You are an expert Python code generator for data analysis. Your task is to write Python code to answer the user's question.
+
 **DataFrame Information:**
-{self.df_info}
+{self.dataset_context}
+
 **User Question:** "{query}"
-**Instructions:**
-Provide a clear, one-line plan. Be smart about it. If the user asks for "first floor", your plan should involve checking for multiple variations like "1", "First", "1st", etc.
-Example Plan: "Filter the DataFrame for rows where `complex` is 'Inorbit Mall (Hyderabad)' and `floor` is in a list of first-floor values, then extract the unique brand names."
+
+**CRITICAL INSTRUCTIONS:**
+1.  **CODE ONLY:** You MUST respond with ONLY raw Python code. Do not include any explanations or markdown.
+2.  **USE `df`:** The pandas DataFrame is available as the variable `df`.
+3.  **FINAL RESULT:** The code MUST end with a dictionary named `result`.
+    - For a DataFrame/Series, use key 'df'. Example: `result = {{'df': my_dataframe}}`
+    - For a single value, use key 'text'. Example: `result = {{'text': f'The answer is {{my_value}}'}}`
+    - For a chart, use key 'chart_path'. Example: `result = {{'chart_path': save_chart(plt)}}`
 """
-        return self._call_openai_api(prompt)
+        code = self._call_openai_api(prompt)
+        cleaned_code = re.sub(r"^```(?:python)?\n|\n```$", "", code, flags=re.MULTILINE).strip()
+        logger.info(f"--- Generated Code ---\n{cleaned_code}\n----------------------")
 
-    def _get_corrected_plan(self, original_plan: str, error_message: str) -> str:
-        logger.info("Revisiting the plan due to a data or plan error...")
-        prompt = f"""
-You are an expert data analysis plan corrector. A plan failed to execute. Your task is to create a new, safer plan.
-**Original Plan:** {original_plan}
-**Execution Error:** {error_message}
-**Available DataFrame Columns:** {self.actual_columns}
-**Instructions:**
-Analyze the error. If it's a `ValueError` or `TypeError`, the data in a column is likely dirty. The new plan MUST focus on cleaning that column. If it's a `KeyError`, a column name is wrong. Correct the plan to use a valid column name. Provide only the new, single-line plan.
-"""
-        corrected_plan = self._call_openai_api(prompt)
-        logger.info(f"✅ Corrected Plan: {corrected_plan}")
-        return corrected_plan
+        local_scope = {}
+        try:
+            logger.info("Step 3: Executing code in a safe environment...")
+            bytecode = compile_restricted(cleaned_code, "<inline>", "exec")
+            exec(bytecode, self._globals, local_scope)
+            logger.info("✅ Code executed successfully.")
+            return local_scope.get("result")
+        except Exception as e:
+            logger.error(f"Code execution failed: {type(e).__name__}: {e}")
+            raise
 
-    def _generate_and_execute_code(self, plan: str, max_retries: int) -> Union[Dict[str, Any], None]:
-        current_plan = plan
-        for attempt in range(max_retries):
-            logger.info(f"Step 2: Generating Python code (Attempt {attempt + 1}/{max_retries})...")
-            
-            # --- FIX STARTS HERE: Added self.df_info to the prompt ---
-            prompt = f"""
-You are an expert Python code generator for data analysis. Your task is to write Python code to accomplish the goal described in the plan.
-
-**DataFrame Information:**
-{self.df_info}
-
-**Plan to Execute:** {current_plan}
-
-**Instructions:**
-- Write standard Python code using pandas. The DataFrame is available as `df`.
-- **HANDLE MESSY DATA:** The `floor` column might contain comma-separated values like "Ground,1,2". To check if "1" is on that floor, you must use `str.contains('1')`. A simple `==` check will fail.
-- **CRITICAL SAFETY RULE:** You **MUST NOT** modify the `df` DataFrame.
-- **RESULT FORMAT:** The final output **MUST** be a dictionary named `result`.
-    - For a DataFrame/Series, use key 'df'. Example: `result = {{'df': my_dataframe}}`.
-    - For a single value, use key 'text'. Example: `result = {{'text': f'The answer is {{my_value}}'}}`.
-    - For a chart, use key 'chart_path'. Example: `result = {{'chart_path': save_chart(plt)}}`.
-- **DO NOT** include any `import` statements or conversational text. Only provide the raw Python code.
-"""
-            # --- FIX ENDS HERE ---
-
-            code = self._call_openai_api(prompt)
-            cleaned_code = re.sub(r"^```(?:python)?\n|\n```$", "", code, flags=re.MULTILINE).strip()
-            logger.info(f"--- Generated Code ---\n{cleaned_code}\n----------------------")
-            
-            local_scope = {}
-            try:
-                logger.info("Step 3: Executing code...")
-                bytecode = compile_restricted(cleaned_code, "<inline>", "exec")
-                exec(bytecode, self._globals, local_scope)
-                logger.info("✅ Code executed successfully.")
-                return local_scope.get("result")
-            except Exception as e:
-                error_str = f"{type(e).__name__}: {e}"
-                logger.error(f"❌ Execution failed: {error_str}")
-                
-                if isinstance(e, (KeyError, ValueError, TypeError, SyntaxError)) and attempt < max_retries - 1:
-                    current_plan = self._get_corrected_plan(current_plan, error_str)
-                    continue
-                else:
-                    logger.error("Max retries reached or uncorrectable error. Halting execution.")
-                    raise e
-        
-        raise LLMError(f"Code generation failed after {max_retries} attempts.")
-
-    def _summarize_result(self, query: str, plan: str, result: Dict[str, Any]) -> str:
+    def _summarize_result(self, query: str, result: Dict[str, Any]) -> str:
+        """Summarizes the execution result into a final, business-friendly HTML output."""
         logger.info("Step 4: Formatting output and generating summary...")
-        output_html = ""
-        result_data = result.get('df')
+        raw_result_html = ""
+        chart_html = ""
 
-        if isinstance(result_data, pd.DataFrame):
-            output_html = result_data.to_html(index=False, classes="table table-striped", border=0)
-        elif isinstance(result_data, pd.Series):
-            output_html = result_data.to_frame().to_html(index=False, classes="table table-striped", border=0)
-        elif "text" in result:
-            output_html = f'<p style="font-size: 1.1em;">{result["text"]}</p>'
-        elif "chart_path" in result:
-            relative_path = os.path.relpath(result["chart_path"]).replace("\\", "/")
-            output_html = f"<img src='/{relative_path}' alt='Generated Chart' style='max-width:100%; height:auto;'/>"
+        if not result or not isinstance(result, dict):
+            raw_result_html = "<p>The analysis did not produce a valid result.</p>"
+        elif 'df' in result:
+            df_res = result['df']
+            if isinstance(df_res, (pd.DataFrame, pd.Series)) and not df_res.empty:
+                if isinstance(df_res, pd.Series): df_res = df_res.to_frame()
+                raw_result_html = df_res.head(20).to_html(index=False, classes="table", border=0)
+            else:
+                raw_result_html = "<p>The analysis returned an empty dataset.</p>"
+        elif 'text' in result:
+            raw_result_html = f"<p>{result['text']}</p>"
+        
+        if 'chart_path' in result and result['chart_path']:
+            public_url = f"/{result['chart_path'].replace(os.sep, '/')}"
+            chart_html = f"<img src='{public_url}' alt='Analysis Chart' style='max-width:100%; margin-bottom:1rem;'>"
 
         summary_prompt = """
-You are a business analyst. Your goal is to provide a clear, concise summary of a data analysis result for a non-technical audience.
+You are a business insights analyst. Your task is to interpret a raw analysis output and provide a clear, concise summary in HTML.
 **Original User Question:** "{query}"
-**Final Analysis Plan:** "{plan}"
-**Result Data (HTML format):**
-{output_html}
+**Raw Analysis Result (HTML format):**
+{raw_result_html}
 **Instructions:**
-Start with a direct answer to the user's question. If there is a table, mention what it contains. If the result is text, summarize its findings. If the result is empty or NaN, state that the requested data could not be found. Keep the summary professional.
+- Provide a short executive summary that directly answers the user's question.
+- If a table is present, briefly explain what it shows.
+- If a chart was generated, provide a short caption for it.
+- Convert technical column names to readable labels (e.g., 'chargeable_area_sft' -> 'Chargeable Area (sq ft)').
+- Return **ONLY** the summary as a clean HTML block (e.g., using `<p>` and `<h4>` tags).
 """
-        summary = self._call_openai_api(summary_prompt, temperature=0.3)
-        
-        return f'<div><p><strong>Summary</strong></p><p>{summary}</p></div><br>{output_html}'
+        summary_html = self._call_openai_api(summary_prompt, temperature=0.2)
+        return chart_html + summary_html + raw_result_html
 
-    def process_query(self, query: str, max_retries: int = 3) -> Generator[str, None, None]:
+    def process_query(self, query: str) -> Generator[str, None, None]:
+        """
+        Processes a user query through the full pipeline and yields a single, final HTML answer.
+        """
+        logger.info(f"Processing query: {query}")
         self.conversation_history.append({"role": "user", "content": query})
+
         try:
-            logger.info("Step 1: Creating an analysis plan...")
-            plan = self._get_analysis_plan(query)
-            if "cannot be answered" in plan.lower():
-                yield f"⚠️ **Analysis Stopped:** {plan}"
+            # 1. Intent / Clarification
+            intent = self._get_intent(query)
+            if intent.get("type") == "clarification":
+                question = intent.get("question", "Could you please clarify your request?")
+                self.conversation_history.append({"role": "assistant", "content": question})
+                yield question
                 return
-            logger.info(f"✅ Initial Plan: {plan}")
 
-            result = self._generate_and_execute_code(plan, max_retries)
-            
+            # 2. Generate and Execute Code (No planning step)
+            result = self._generate_and_execute_code(query)
             if result is None:
-                raise LLMError("Could not retrieve a result from code execution.")
+                raise LLMError("Code execution failed to produce a result.")
 
-            final_output = self._summarize_result(query, plan, result)
+            # 3. Summarize Result and yield final answer
+            final_output = self._summarize_result(query, result)
             self.conversation_history.append({"role": "assistant", "content": final_output})
             yield final_output
 
         except Exception as e:
-            logger.error(f"An unexpected error occurred during processing: {e}", exc_info=True)
-            error_message = f"⚠️ An unexpected error occurred: {e}"
+            logger.error(f"Error during query processing: {e}", exc_info=True)
+            error_message = f"⚠️ Sorry, I encountered an error while processing your query: {e}"
             self.conversation_history.append({"role": "assistant", "content": error_message})
             yield error_message
 
-    def get_conversation_history(self) -> List[Dict[str, str]]:
-        return self.conversation_history
-
-    def clear_conversation_history(self):
-        self.conversation_history.clear()
-        logger.info("Cleared conversation history.")
-
     def suggest_questions(self) -> List[str]:
+        """Provides a list of suggested questions based on the DataFrame's columns."""
         suggestions = [
             "Which tenants have the largest deal sizes?",
-            "Show a distribution of rental rates.",
+            "Show a distribution of rental rates by floor.",
             "How many units are vacant versus leased?",
             "What’s the average chargeable area per unit?",
             "Plot a histogram of chargeable area."
@@ -244,3 +245,12 @@ Start with a direct answer to the user's question. If there is a table, mention 
                 col2 = numeric_columns[1]
                 suggestions.append(f"Is there a correlation between {col1} and {col2}?")
         return suggestions[:8]
+
+    def get_conversation_history(self) -> List[Dict[str, str]]:
+        """Returns the current conversation history."""
+        return self.conversation_history
+
+    def clear_conversation_history(self):
+        """Clears the conversation history."""
+        self.conversation_history.clear()
+        logger.info("Cleared conversation history.")
