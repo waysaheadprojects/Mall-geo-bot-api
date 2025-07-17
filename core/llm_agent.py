@@ -1,32 +1,30 @@
-"""LLM agent for natural language query processing with PandasAI integration."""
+import os
+import json
+import logging
+from typing import Generator, Dict, Any, List
 
 import pandas as pd
-from typing import Dict, Any, List, Generator, Optional
-import openai
-from openai import OpenAI
-import os
-
-from app.config import settings
-from core.statistical_analyzer import StatisticalAnalyzer
-from utils.exceptions import LLMError, ValidationError
-from utils.logging import LoggerMixin
-
 from pandasai import SmartDataframe
-from pandasai.llm.base import LLM
+from pandasai.llm import OpenAI as PandasAIOpenAI
+from openai import OpenAI
 
+# Custom error
+class LLMError(Exception): pass
 
-class OpenAILLM(LLM):
-    """Custom OpenAI LLM wrapper for PandasAI."""
+# Logging setup
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-    def __init__(self, api_token: str, **kwargs):
-        self.api_token = api_token
-        self.client = OpenAI(api_key=api_token)
-        super().__init__(**kwargs)
+# Reusable OpenAI wrapper
+class OpenAILLM:
+    def __init__(self):
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise LLMError("OPENAI_API_KEY not found in environment.")
+        self.client = OpenAI(api_key=api_key)
 
     def call(self, instruction: str, value: str = "", suffix: str = "") -> str:
-        """Call the OpenAI API."""
         prompt = f"{instruction}\n{value}\n{suffix}".strip()
-
         try:
             response = self.client.chat.completions.create(
                 model="gpt-4.1-nano",
@@ -38,130 +36,137 @@ class OpenAILLM(LLM):
         except Exception as e:
             raise LLMError(f"OpenAI API call failed: {str(e)}")
 
-    @property
-    def type(self) -> str:
-        return "openai"
+    def stream_call(self, prompt: str) -> Generator[str, None, None]:
+        try:
+            stream = self.client.chat.completions.create(
+                model="gpt-4.1-nano",
+                messages=[{"role": "user", "content": prompt}],
+                stream=True,
+            )
+            for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+        except Exception as e:
+            raise LLMError(f"LLM streaming failed: {str(e)}")
 
-
-class StatisticalLLMAgent(LoggerMixin):
-    """LLM-powered agent for processing natural language queries about statistical data."""
-
-    def __init__(self, df: pd.DataFrame, analyzer: StatisticalAnalyzer):
+# Main Statistical Agent
+class StatisticalLLMAgent:
+    def __init__(self, df: pd.DataFrame):
         self.df = df
-        self.analyzer = analyzer
-        self.client = self._initialize_openai_client()
-        self.conversation_history = []
+        self.dataset_context = self._generate_dataset_context()
+        self.conversation_history: List[Dict[str, str]] = []
 
-        self.pandas_ai_llm = OpenAILLM(api_token=settings.openai_api_key)
+        self.llm_wrapper = OpenAILLM()
+        self.client = self.llm_wrapper.client
+
+        self.pandasai_llm = PandasAIOpenAI(api_token=os.environ.get("OPENAI_API_KEY"))
         self.smart_dataframe = SmartDataframe(df, config={
-            "llm": self.pandas_ai_llm,
+            "llm": self.pandasai_llm,
             "enable_cache": False,
             "save_charts": True
         })
 
-        self.dataset_context = self._generate_dataset_context()
-
-        self.log_operation(
-            "initialized",
-            rows=len(df),
-            columns=len(df.columns),
-            numeric_cols=len(analyzer.numeric_columns),
-            categorical_cols=len(analyzer.categorical_columns)
-        )
-
-    def _initialize_openai_client(self) -> OpenAI:
-        if not settings.openai_api_key:
-            raise LLMError("OpenAI API key not configured")
-        return OpenAI(api_key=settings.openai_api_key)
-
     def _generate_dataset_context(self) -> str:
-        basic_info = self.analyzer.get_basic_info()
-        schema_overview = self.analyzer.get_schema_overview()
-
-        context = f"""
-Dataset Overview:
-- Total rows: {basic_info['total_rows']:,}
-- Total columns: {basic_info['total_columns']}
-- Numeric columns: {len(self.analyzer.numeric_columns)} ({', '.join(self.analyzer.numeric_columns[:10])})
-- Categorical columns: {len(self.analyzer.categorical_columns)} ({', '.join(self.analyzer.categorical_columns[:10])})
-- Missing values: {basic_info['missing_values']:,}
-
-Column Details:
-"""
-        for col_info in schema_overview["columns"][:15]:
-            context += f"- {col_info['column']}: {col_info['dtype']}, {col_info['null_percentage']:.1f}% null, {col_info['unique_count']} unique values\n"
-
-        if len(schema_overview["columns"]) > 15:
-            context += f"... and {len(schema_overview['columns']) - 15} more columns\n"
-
+        context = "Dataset Schema:\n"
+        for col in self.df.columns:
+            context += f"- {col}: {self.df[col].dtype}\n"
+        context += f"\nNumber of rows: {len(self.df)}\n"
+        context += f"Number of columns: {len(self.df.columns)}\n"
+        context += "First 5 rows:\n"
+        context += self.df.head().to_markdown(index=False)
         return context
 
-    def process_query(self, query: str) -> Generator[str, None, None]:
-        self.log_operation("process_query", query_length=len(query))
+    def _build_prompt(self, query: str) -> str:
+        system_prompt = """
+You are an expert data analyst. Your job is to answer questions about the provided dataset.
+- Ask for clarification if the question is ambiguous.
+- If possible, provide direct answers from the dataset.
+- You can also provide Python/Pandas code if required.
+- Use visualizations where appropriate.
+"""
+        examples = """
+Examples:
+User: "What's the average deal size?"
+Assistant: "The average deal size is 1,200 sqft."
 
+User: "Show me the biggest tenants."
+Assistant: "Do you mean by total area or by number of units?"
+"""
+        history = "\n".join([f"{msg['role'].title()}: {msg['content']}" for msg in self.conversation_history])
+
+        return f"{system_prompt}\n\nDataset:\n{self.dataset_context}\n\nHistory:\n{history}\n\nExamples:\n{examples}\n\nUser Query: \"{query}\""
+
+    def _get_intent(self, query: str) -> Dict[str, Any]:
+        intent_prompt = """
+Determine if the following query is clear or ambiguous.
+
+If clear, respond with:
+{{"type": "clear_query"}}
+
+If ambiguous, respond with:
+{{"type": "clarification", "question": "Your clarifying question"}}
+
+User Query: "{query}"
+"""
         try:
-            self.conversation_history.append({"role": "user", "content": query})
+            response = self.client.chat.completions.create(
+                model="gpt-4.1-nano",
+                messages=[{"role": "user", "content": intent_prompt}],
+                temperature=0.0,
+            )
+            content = response.choices[0].message.content
+            logger.info(f"Intent response: {content}")
+            return json.loads(content)
+        except json.JSONDecodeError:
+            logger.warning("JSON parsing failed during intent detection. Assuming clear.")
+            return {"type": "clear_query"}
+        except Exception as e:
+            logger.error(f"Intent check failed: {e}")
+            return {"type": "clear_query"}
 
-            pandasai_response = self.smart_dataframe.chat(query)
+    def process_query(self, query: str) -> Generator[str, None, None]:
+        logger.info(f"Received query: {query}")
+        try:
+            intent = self._get_intent(query)
+
+            if intent.get("type") == "clarification":
+                question = intent.get("question", "Could you please clarify your question?")
+                self.conversation_history.append({"role": "assistant", "content": question})
+                yield question
+                return
+
+            self.conversation_history.append({"role": "user", "content": query})
+            full_prompt = self._build_prompt(query)
+
+            pandasai_response = self.smart_dataframe.chat(full_prompt)
 
             if isinstance(pandasai_response, pd.DataFrame):
-                response_content = f"Here's the result:<br><br>{pandasai_response.to_html(index=False)}"
-            elif isinstance(pandasai_response, (int, float, bool)):
-                response_content = f"The answer is: <b>{pandasai_response}</b>"
+                html = pandasai_response.to_html(index=False)
+                self.conversation_history.append({"role": "assistant", "content": html})
+                yield html
+            elif isinstance(pandasai_response, str) and pandasai_response.strip().endswith(".png"):
+                url = f"https://mallgpt.waysaheadglobal.com/{pandasai_response.replace(os.sep, '/')}"
+                img_html = f'<img src="{url}" alt="Chart" style="max-width:100%;">'
+                self.conversation_history.append({"role": "assistant", "content": img_html})
+                yield img_html
             elif isinstance(pandasai_response, str):
-                if pandasai_response.strip().endswith(".png") and os.path.exists(pandasai_response):
-                    relative_path = os.path.relpath(pandasai_response, start=os.getcwd())
-                    public_url = f'https://mallgpt.waysaheadglobal.com/{relative_path.replace(os.sep, "/").strip()}'
-                    response_content = f'<img src={public_url} alt=GeneratedChart style=max-width:100%;>'
-                else:
-                    response_content = pandasai_response
-            elif pandasai_response is None:
-                response_content = "I processed your request, but couldn't generate a specific answer. Please try rephrasing your question."
+                self.conversation_history.append({"role": "assistant", "content": pandasai_response})
+                yield pandasai_response
             else:
-                response_content = f"Result: {str(pandasai_response)}"
-
-            for chunk in self._stream_text(response_content):
-                yield chunk
-
-            self.conversation_history.append({"role": "assistant", "content": response_content})
-            if len(self.conversation_history) > 20:
-                self.conversation_history = self.conversation_history[-20:]
+                fallback = str(pandasai_response)
+                self.conversation_history.append({"role": "assistant", "content": fallback})
+                yield fallback
 
         except Exception as e:
-            error_message = f"I encountered an error while analyzing your data with PandasAI: {str(e)}"
-            self.logger.error(f"Query processing failed with PandasAI: {str(e)}")
-            yield error_message
+            logger.error(f"Error during query processing: {e}")
+            yield "⚠️ Sorry, I encountered an error while processing your query."
 
-    def _stream_text(self, text: str, chunk_size: int = 50) -> Generator[str, None, None]:
-        for i in range(0, len(text), chunk_size):
-            yield text[i:i + chunk_size]
+    def log_operation(self, operation: str, **kwargs):
+        logger.info(f"{operation} - {json.dumps(kwargs)}")
 
     def get_conversation_history(self) -> List[Dict[str, str]]:
-        return self.conversation_history.copy()
+        return self.conversation_history
 
-    def clear_conversation_history(self) -> None:
-        self.conversation_history = []
-        self.log_operation("clear_conversation_history")
-
-    def suggest_questions(self) -> List[str]:
-        suggestions = [
-            "Which brands or tenants have the largest retail footprint (deal size in sft) in Inorbit Mall Hyderabad?",
-            "What is the distribution of deal sizes (in square feet) for retail spaces in Inorbit Mall Hyderabad?",
-            "How many retail units are currently occupied versus vacant in Inorbit Mall Hyderabad?",
-            "What is the average number of seats available in retail units within Inorbit Mall Hyderabad?",
-            "What is the breakdown of deal types (e.g., new lease, renewal) within Inorbit Mall Hyderabad?"
-        ]
-
-        if self.analyzer.numeric_columns:
-            col = self.analyzer.numeric_columns[0]
-            suggestions.extend([
-                f"What is the mean and standard deviation of {col}?",
-                f"Are there outliers in {col}?",
-                f"What is the distribution of {col}?"
-            ])
-
-        if len(self.analyzer.numeric_columns) >= 2:
-            col1, col2 = self.analyzer.numeric_columns[:2]
-            suggestions.append(f"Is there a correlation between {col1} and {col2}?")
-
-        return suggestions[:8]
+    def clear_conversation_history(self):
+        self.conversation_history.clear()
+        logger.info("Cleared conversation history.")
