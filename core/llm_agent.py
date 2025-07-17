@@ -139,69 +139,191 @@ Query: "{query}"
             return {"type": "clear_query"}
 
     def process_query(self, query: str) -> Generator[str, None, None]:
-        logger.info(f"Processing query: {query}")
-        try:
-            intent = self._get_intent(query)
+            """
+            Run a user query through PandasAI, then rephrase the raw analytical result into
+            a business-friendly, HTML-formatted answer (no code shown).
+            """
+            logger.info(f"Processing query: {query}")
+        
+            try:
+                # ------------------------------------------------------------------
+                # 1. Intent / clarification
+                # ------------------------------------------------------------------
+                intent = self._get_intent(query)
+                if intent.get("type") == "clarification":
+                    question = intent.get("question", "Could you clarify your query?")
+                    self.conversation_history.append({"role": "assistant", "content": question})
+                    yield question
+                    return
+        
+                # ------------------------------------------------------------------
+                # 2. Run PandasAI
+                # ------------------------------------------------------------------
+                self.conversation_history.append({"role": "user", "content": query})
+                full_prompt = self._build_prompt(query)
+                pandasai_response = self.smart_dataframe.chat(full_prompt)
+        
+                # ------------------------------------------------------------------
+                # 3. Normalize PandasAI output
+                #    We try to extract: (result_df, scalar, text, chart_path)
+                # ------------------------------------------------------------------
+                result_df = None
+                scalar_value = None
+                text_blob = None
+                chart_path = None
+        
+                # Case A: PandasAI sometimes returns a DataFrame
+                if isinstance(pandasai_response, pd.DataFrame):
+                    result_df = pandasai_response
+        
+                # Case B: PandasAI may return a string (chart path OR narrative)
+                elif isinstance(pandasai_response, str):
+                    stripped = pandasai_response.strip()
+                    if stripped.endswith(".png") and os.path.exists(stripped):
+                        chart_path = stripped
+                    else:
+                        text_blob = stripped
+        
+                # Case C: PandasAI may return a scalar
+                elif isinstance(pandasai_response, (int, float, bool)):
+                    scalar_value = pandasai_response
+        
+                # Case D: PandasAI may return structured dict(s)
+                elif isinstance(pandasai_response, dict):
+                    # Common structure: {'type': 'dataframe', 'value': df} OR {'type': 'plot', 'value': path}
+                    ptype = pandasai_response.get("type")
+                    pval = pandasai_response.get("value")
+                    if ptype == "dataframe" and isinstance(pval, pd.DataFrame):
+                        result_df = pval
+                    elif ptype == "plot" and isinstance(pval, str) and pval.endswith(".png"):
+                        if os.path.exists(pval):
+                            chart_path = pval
+                        else:
+                            text_blob = str(pval)
+                    else:
+                        # Fallback: stringify
+                        text_blob = str(pandasai_response)
+        
+                # Case E: PandasAI may return tuple/list of result + plot
+                elif isinstance(pandasai_response, (list, tuple)):
+                    # Walk items and classify
+                    for item in pandasai_response:
+                        if isinstance(item, pd.DataFrame) and result_df is None:
+                            result_df = item
+                        elif isinstance(item, dict):
+                            itype = item.get("type")
+                            ival = item.get("value")
+                            if itype == "dataframe" and isinstance(ival, pd.DataFrame) and result_df is None:
+                                result_df = ival
+                            elif itype == "plot" and isinstance(ival, str) and ival.endswith(".png"):
+                                if os.path.exists(ival):
+                                    chart_path = ival
+                            else:
+                                text_blob = str(item)
+                        elif isinstance(item, str) and item.endswith(".png") and os.path.exists(item):
+                            chart_path = item
+                        elif isinstance(item, str):
+                            text_blob = item
+                        elif isinstance(item, (int, float, bool)) and scalar_value is None:
+                            scalar_value = item
+                        else:
+                            # ignore / fallback
+                            pass
+        
+                else:
+                    text_blob = str(pandasai_response)
+        
+                # ------------------------------------------------------------------
+                # 4. Build a structured "analysis result" string to feed the chat model
+                # ------------------------------------------------------------------
+                parts = []
+        
+                # Include high-level dataset context so the model can explain relative scale.
+                # Truncate to avoid token bloat.
+                ctx = self.dataset_context
+                if len(ctx) > 1200:
+                    ctx = ctx[:1200] + "\n...[truncated]..."
+                parts.append("DATASET CONTEXT (truncated):\n" + ctx)
+        
+                # Add user query
+                parts.append(f"USER QUERY:\n{query}")
+        
+                # Add result summary preview
+                if result_df is not None:
+                    parts.append(
+                        "RESULT DATAFRAME PREVIEW (first 10 rows):\n" +
+                        result_df.head(10).to_markdown(index=False)
+                    )
+                    parts.append(f"RESULT DATAFRAME SHAPE: {result_df.shape[0]} rows x {result_df.shape[1]} columns")
+                if scalar_value is not None:
+                    parts.append(f"SCALAR RESULT: {scalar_value}")
+                if text_blob:
+                    parts.append(f"PANDASAI TEXT RESULT:\n{text_blob}")
+                if chart_path:
+                    parts.append(f"CHART PATH: {chart_path}")
+        
+                result_str = "\n\n".join(parts)
+        
+                # ------------------------------------------------------------------
+                # 5. Build GPT prompt for business explanation
+                # ------------------------------------------------------------------
+                # NOTE: We purposely do NOT include <img> in the prompt; we inject it later (Step 7).
+                gpt_prompt = f"""
+        You are a business insights analyst.
+        
+        You are given:
+        - Dataset context
+        - The user's question
+        - Raw analysis output from an internal data tool (may include a table preview, numbers, and an image path)
+        
+        Your task:
+        1. Interpret the result in *business language* (no code, no Python, no technical stack talk).
+        2. Provide a short executive summary (1-3 bullet points or short paragraph).
+        3. If numbers are present, state the key metric(s) clearly (with comma formatting or % as relevant).
+        4. If a table is needed, output an HTML table (<table>..</table>) using the rows provided in the result preview.
+        5. If a chart will be shown (we tell you via CHART PATH), include a short caption explaining what trends it shows, but do NOT embed <img> yourself; the system will render it.
+        6. Avoid repeating raw column names verbatim if they are ugly; convert snake_case to readable labels (e.g., 'chargeable_area_sft' -> 'Chargeable Area (sq ft)').
+        7. If the sample preview is large, summarize patterns; don't dump everything.
+        
+        Return **ONLY HTML** (a top-level <div> wrapper is fine). No Markdown fences.
+        
+        --- RAW ANALYSIS BELOW ---
+        {result_str}
+        """
+        
+                # ------------------------------------------------------------------
+                # 6. Call GPT to convert raw result -> business HTML
+                # ------------------------------------------------------------------
+                gpt_response = self.client.chat.completions.create(
+                    model="gpt-4.1-nano",
+                    messages=[{"role": "user", "content": gpt_prompt}],
+                    temperature=0.3,
+                    max_tokens=1200,
+                )
+                business_html = gpt_response.choices[0].message.content.strip()
+        
+                # ------------------------------------------------------------------
+                # 7. Inject chart <img> (if any) ahead of explanation
+                # ------------------------------------------------------------------
+                chart_html = ""
+                if chart_path:
+                    # Normalize / public URL
+                    chart_path_for_url = chart_path.replace(os.sep, "/")
+                    public_url = f"https://mallgpt.waysaheadglobal.com/{chart_path_for_url}"
+                    chart_html = f"<img src='{public_url}' alt='Analysis Chart' style='max-width:100%; margin-bottom:1rem;'>"
+        
+                final_output = chart_html + business_html
+        
+                # ------------------------------------------------------------------
+                # 8. Save to history + return
+                # ------------------------------------------------------------------
+                self.conversation_history.append({"role": "assistant", "content": final_output})
+                yield final_output
+        
+            except Exception as e:
+                logger.error(f"Error during query processing: {e}")
+                yield "⚠️ Sorry, I encountered an error while processing your query."
 
-            if intent.get("type") == "clarification":
-                question = intent.get("question", "Could you clarify your query?")
-                self.conversation_history.append({"role": "assistant", "content": question})
-                yield question
-                return
-
-            self.conversation_history.append({"role": "user", "content": query})
-            full_prompt = self._build_prompt(query)
-
-            # Step 1: Get result from PandasAI
-            pandasai_response = self.smart_dataframe.chat(full_prompt)
-
-            # Step 2: Convert to plain text for GPT
-            if isinstance(pandasai_response, pd.DataFrame):
-                result_str = f"Data:\n{pandasai_response.to_markdown(index=False)}"
-            elif isinstance(pandasai_response, str):
-                result_str = pandasai_response
-            elif isinstance(pandasai_response, (int, float, bool)):
-                result_str = f"Result: {pandasai_response}"
-            else:
-                result_str = str(pandasai_response)
-
-            chart_html = ""
-            if isinstance(pandasai_response, str) and pandasai_response.strip().endswith(".png"):
-                chart_path = pandasai_response.strip().replace(os.sep, "/")
-                public_url = f"https://mallgpt.waysaheadglobal.com/{chart_path}"
-                chart_html = f"<img src='{public_url}' style='max-width:100%;'><br>"
-
-            # Step 3: Send result to GPT for business explanation
-            gpt_prompt = """
-You are a business analyst assistant.
-
-You will be given an analysis result generated from a data science tool (like PandasAI). Your job is to:
-- Ignore any code or technical syntax
-- Summarize the findings in clear, professional business terms
-- Present the insight in simple HTML with explanation and tables
-- If a chart is present, describe what it shows
-
-Here is the analysis result:
-
-Now, generate a clean HTML response for a business user. Do not show code. Just explain what the data shows and why it matters.
-"""
-
-            gpt_response = self.client.chat.completions.create(
-                model="gpt-4.1-nano",
-                messages=[{"role": "user", "content": gpt_prompt}],
-                temperature=0.3,
-                max_tokens=1000
-            )
-
-            business_html = gpt_response.choices[0].message.content.strip()
-            final_output = chart_html + business_html
-
-            self.conversation_history.append({"role": "assistant", "content": final_output})
-            yield final_output
-
-        except Exception as e:
-            logger.error(f"Error during query processing: {e}")
-            yield "⚠️ Sorry, I encountered an error while processing your query."
 
     def suggest_questions(self) -> List[str]:
         suggestions = [
