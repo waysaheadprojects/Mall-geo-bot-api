@@ -7,15 +7,17 @@ import pandas as pd
 from pandasai import SmartDataframe
 from pandasai.llm import OpenAI as PandasAIOpenAI
 from openai import OpenAI
+from core.statistical_analyzer import StatisticalAnalyzer
 
-# Custom error
-class LLMError(Exception): pass
+# Custom exception
+class LLMError(Exception):
+    pass
 
-# Logging setup
+# Setup logger
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Reusable OpenAI wrapper
+# Custom OpenAI Wrapper
 class OpenAILLM:
     def __init__(self):
         api_key = os.environ.get("OPENAI_API_KEY")
@@ -49,11 +51,12 @@ class OpenAILLM:
         except Exception as e:
             raise LLMError(f"LLM streaming failed: {str(e)}")
 
-# Main Statistical Agent
+
+# Final StatisticalLLMAgent
 class StatisticalLLMAgent:
-    def __init__(self, df: pd.DataFrame):
+    def __init__(self, df: pd.DataFrame, analyzer: StatisticalAnalyzer):
         self.df = df
-        self.dataset_context = self._generate_dataset_context()
+        self.analyzer = analyzer
         self.conversation_history: List[Dict[str, str]] = []
 
         self.llm_wrapper = OpenAILLM()
@@ -66,23 +69,36 @@ class StatisticalLLMAgent:
             "save_charts": True
         })
 
+        self.dataset_context = self._generate_dataset_context()
+
     def _generate_dataset_context(self) -> str:
-        context = "Dataset Schema:\n"
-        for col in self.df.columns:
-            context += f"- {col}: {self.df[col].dtype}\n"
-        context += f"\nNumber of rows: {len(self.df)}\n"
-        context += f"Number of columns: {len(self.df.columns)}\n"
-        context += "First 5 rows:\n"
-        context += self.df.head().to_markdown(index=False)
+        basic_info = self.analyzer.get_basic_info()
+        schema_overview = self.analyzer.get_schema_overview()
+
+        context = f"""
+Dataset Overview:
+- Total rows: {basic_info['total_rows']:,}
+- Total columns: {basic_info['total_columns']}
+- Numeric columns: {len(self.analyzer.numeric_columns)} ({', '.join(self.analyzer.numeric_columns[:10])})
+- Categorical columns: {len(self.analyzer.categorical_columns)} ({', '.join(self.analyzer.categorical_columns[:10])})
+- Missing values: {basic_info['missing_values']:,}
+
+Column Details:
+"""
+        for col_info in schema_overview["columns"][:15]:
+            context += f"- {col_info['column']}: {col_info['dtype']}, {col_info['null_percentage']:.1f}% null, {col_info['unique_count']} unique values\n"
+
+        if len(schema_overview["columns"]) > 15:
+            context += f"... and {len(schema_overview['columns']) - 15} more columns\n"
+
         return context
 
     def _build_prompt(self, query: str) -> str:
         system_prompt = """
 You are an expert data analyst. Your job is to answer questions about the provided dataset.
-- Ask for clarification if the question is ambiguous.
-- If possible, provide direct answers from the dataset.
-- You can also provide Python/Pandas code if required.
-- Use visualizations where appropriate.
+- If the query is ambiguous, ask a clarifying question.
+- If it is clear, answer using relevant statistics or code.
+- Use charts if helpful and describe them clearly.
 """
         examples = """
 Examples:
@@ -94,19 +110,19 @@ Assistant: "Do you mean by total area or by number of units?"
 """
         history = "\n".join([f"{msg['role'].title()}: {msg['content']}" for msg in self.conversation_history])
 
-        return f"{system_prompt}\n\nDataset:\n{self.dataset_context}\n\nHistory:\n{history}\n\nExamples:\n{examples}\n\nUser Query: \"{query}\""
+        return f"{system_prompt}\n\nDataset Context:\n{self.dataset_context}\n\nConversation:\n{history}\n\nExamples:\n{examples}\n\nUser Query: \"{query}\""
 
     def _get_intent(self, query: str) -> Dict[str, Any]:
         intent_prompt = """
-Determine if the following query is clear or ambiguous.
+Check if the query is ambiguous.
 
-If clear, respond with:
+If clear:
 {{"type": "clear_query"}}
 
-If ambiguous, respond with:
+If ambiguous:
 {{"type": "clarification", "question": "Your clarifying question"}}
 
-User Query: "{query}"
+Query: "{query}"
 """
         try:
             response = self.client.chat.completions.create(
@@ -118,19 +134,19 @@ User Query: "{query}"
             logger.info(f"Intent response: {content}")
             return json.loads(content)
         except json.JSONDecodeError:
-            logger.warning("JSON parsing failed during intent detection. Assuming clear.")
+            logger.warning("Intent check failed (invalid JSON). Proceeding as clear.")
             return {"type": "clear_query"}
         except Exception as e:
             logger.error(f"Intent check failed: {e}")
             return {"type": "clear_query"}
 
     def process_query(self, query: str) -> Generator[str, None, None]:
-        logger.info(f"Received query: {query}")
+        logger.info(f"Processing query: {query}")
         try:
             intent = self._get_intent(query)
 
             if intent.get("type") == "clarification":
-                question = intent.get("question", "Could you please clarify your question?")
+                question = intent.get("question", "Could you clarify your query?")
                 self.conversation_history.append({"role": "assistant", "content": question})
                 yield question
                 return
@@ -160,9 +176,6 @@ User Query: "{query}"
         except Exception as e:
             logger.error(f"Error during query processing: {e}")
             yield "⚠️ Sorry, I encountered an error while processing your query."
-
-    def log_operation(self, operation: str, **kwargs):
-        logger.info(f"{operation} - {json.dumps(kwargs)}")
 
     def get_conversation_history(self) -> List[Dict[str, str]]:
         return self.conversation_history
