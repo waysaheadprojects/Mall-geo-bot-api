@@ -52,6 +52,16 @@ class OpenAILLM:
 class StatisticalLLMAgent:
     def __init__(self, df: pd.DataFrame, analyzer: StatisticalAnalyzer):
         self.df = df
+        # --- FIX STARTS HERE ---
+        # Clean potentially problematic numeric columns upfront.
+        # This prevents the TypeError before it can happen in pandasai.
+        numeric_cols_to_clean = ['current_rent_chargeable_inr_per_sft', 'chargeable_area_sft']
+        for col in numeric_cols_to_clean:
+            if col in self.df.columns:
+                # Use pd.to_numeric to convert the column, coercing errors to NaN
+                self.df[col] = pd.to_numeric(self.df[col], errors='coerce')
+        # --- FIX ENDS HERE ---
+
         self.analyzer = analyzer
         self.conversation_history: List[Dict[str, str]] = []
 
@@ -59,7 +69,7 @@ class StatisticalLLMAgent:
         self.client = self.llm_wrapper.client
 
         self.pandasai_llm = PandasAIOpenAI(api_token=os.environ.get("OPENAI_API_KEY"))
-        self.smart_dataframe = SmartDataframe(df, config={
+        self.smart_dataframe = SmartDataframe(self.df, config={ # Use the cleaned self.df
             "llm": self.pandasai_llm,
             "enable_cache": False,
             "save_charts": True,
@@ -172,25 +182,17 @@ Query: "{query}"
                 text_blob = None
                 chart_path = None
         
-                # Case A: PandasAI sometimes returns a DataFrame
                 if isinstance(pandasai_response, pd.DataFrame):
                     result_df = pandasai_response
-        
-                # Case B: PandasAI may return a string (chart path OR narrative)
                 elif isinstance(pandasai_response, str):
                     stripped = pandasai_response.strip()
                     if stripped.endswith(".png") and os.path.exists(stripped):
                         chart_path = stripped
                     else:
                         text_blob = stripped
-        
-                # Case C: PandasAI may return a scalar
                 elif isinstance(pandasai_response, (int, float, bool)):
                     scalar_value = pandasai_response
-        
-                # Case D: PandasAI may return structured dict(s)
                 elif isinstance(pandasai_response, dict):
-                    # Common structure: {'type': 'dataframe', 'value': df} OR {'type': 'plot', 'value': path}
                     ptype = pandasai_response.get("type")
                     pval = pandasai_response.get("value")
                     if ptype == "dataframe" and isinstance(pval, pd.DataFrame):
@@ -201,12 +203,8 @@ Query: "{query}"
                         else:
                             text_blob = str(pval)
                     else:
-                        # Fallback: stringify
                         text_blob = str(pandasai_response)
-        
-                # Case E: PandasAI may return tuple/list of result + plot
                 elif isinstance(pandasai_response, (list, tuple)):
-                    # Walk items and classify
                     for item in pandasai_response:
                         if isinstance(item, pd.DataFrame) and result_df is None:
                             result_df = item
@@ -226,10 +224,6 @@ Query: "{query}"
                             text_blob = item
                         elif isinstance(item, (int, float, bool)) and scalar_value is None:
                             scalar_value = item
-                        else:
-                            # ignore / fallback
-                            pass
-        
                 else:
                     text_blob = str(pandasai_response)
         
@@ -237,18 +231,12 @@ Query: "{query}"
                 # 4. Build a structured "analysis result" string to feed the chat model
                 # ------------------------------------------------------------------
                 parts = []
-        
-                # Include high-level dataset context so the model can explain relative scale.
-                # Truncate to avoid token bloat.
                 ctx = self.dataset_context
                 if len(ctx) > 1200:
                     ctx = ctx[:1200] + "\n...[truncated]..."
                 parts.append("DATASET CONTEXT (truncated):\n" + ctx)
-        
-                # Add user query
                 parts.append(f"USER QUERY:\n{query}")
         
-                # Add result summary preview
                 if result_df is not None:
                     parts.append(
                         "RESULT DATAFRAME PREVIEW (first 10 rows):\n" +
@@ -267,26 +255,15 @@ Query: "{query}"
                 # ------------------------------------------------------------------
                 # 5. Build GPT prompt for business explanation
                 # ------------------------------------------------------------------
-                # NOTE: We purposely do NOT include <img> in the prompt; we inject it later (Step 7).
                 gpt_prompt = f"""
         You are a business insights analyst.
-        
-        You are given:
-        - Dataset context
-        - The user's question
-        - Raw analysis output from an internal data tool (may include a table preview, numbers, and an image path)
-        
-        Your task:
-        1. Interpret the result in *business language* (no code, no Python, no technical stack talk).
-        2. Provide a short executive summary (1-3 bullet points or short paragraph).
-        3. If numbers are present, state the key metric(s) clearly (with comma formatting or % as relevant).
-        4. If a table is needed, output an HTML table (<table>..</table>) using the rows provided in the result preview.
-        5. If a chart will be shown (we tell you via CHART PATH), include a short caption explaining what trends it shows, but do NOT embed <img> yourself; the system will render it.
-        6. Avoid repeating raw column names verbatim if they are ugly; convert snake_case to readable labels (e.g., 'chargeable_area_sft' -> 'Chargeable Area (sq ft)').
-        7. If the sample preview is large, summarize patterns; don't dump everything.
-        
-        Return **ONLY HTML** (a top-level <div> wrapper is fine). No Markdown fences.
-        
+        Your task is to interpret raw analysis output in business language.
+        1. Provide a short executive summary.
+        2. If numbers are present, state the key metrics clearly.
+        3. If a table is needed, output an HTML table.
+        4. If a chart is mentioned, include a short caption for it.
+        5. Convert technical column names to readable labels (e.g., 'chargeable_area_sft' -> 'Chargeable Area (sq ft)').
+        Return ONLY HTML.
         --- RAW ANALYSIS BELOW ---
         {result_str}
         """
@@ -307,7 +284,6 @@ Query: "{query}"
                 # ------------------------------------------------------------------
                 chart_html = ""
                 if chart_path:
-                    # Normalize / public URL
                     chart_path_for_url = chart_path.replace(os.sep, "/")
                     public_url = f"https://mallgpt.waysaheadglobal.com/{chart_path_for_url}"
                     chart_html = f"<img src='{public_url}' alt='Analysis Chart' style='max-width:100%; margin-bottom:1rem;'>"
@@ -317,7 +293,7 @@ Query: "{query}"
                 # ------------------------------------------------------------------
                 # 8. Save to history + return
                 # ------------------------------------------------------------------
-                self.conversation_history.append({"role": "assistant", "content": final_output})
+                self.conversation_history.append({"role": "assistant", "content": final_output} )
                 yield final_output
         
             except Exception as e:
