@@ -177,6 +177,29 @@ Query: "{query}"
             logger.error(f"Error during query processing: {e}")
             yield "⚠️ Sorry, I encountered an error while processing your query."
 
+    def suggest_questions(self) -> List[str]:
+        """Suggests questions based on the dataset context (uses analyzer)."""
+        suggestions = [
+            "Which brands or tenants have the largest retail footprint (deal size in sft) in Inorbit Mall Hyderabad?",
+            "What is the distribution of deal sizes (in square feet) for retail spaces in Inorbit Mall Hyderabad?",
+            "How many retail units are currently occupied versus vacant in Inorbit Mall Hyderabad?",
+            "What is the average number of seats available in retail units within Inorbit Mall Hyderabad?",
+            "What is the breakdown of deal types (e.g., new lease, renewal) within Inorbit Mall Hyderabad?"
+        ]
+
+        if self.analyzer and self.analyzer.numeric_columns:
+            col1 = self.analyzer.numeric_columns[0]
+            suggestions.extend([
+                f"What is the average and standard deviation of {col1}?",
+                f"Are there outliers in {col1}?"
+            ])
+
+            if len(self.analyzer.numeric_columns) > 1:
+                col2 = self.analyzer.numeric_columns[1]
+                suggestions.append(f"Is there a correlation between {col1} and {col2}?")
+
+        return suggestions[:8]
+
     def get_conversation_history(self) -> List[Dict[str, str]]:
         return self.conversation_history
 
