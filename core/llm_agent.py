@@ -94,7 +94,7 @@ class StatisticalLLMAgent:
         numeric_cols = self.df.select_dtypes(include=np.number).columns.tolist()
         categorical_cols = self.df.select_dtypes(include=['object', 'category']).columns.tolist()
 
-        context = """
+        context = f"""
 Dataset Overview:
 - Total rows: {len(self.df):,}
 - Total columns: {len(self.df.columns)}
@@ -146,7 +146,7 @@ User Query: "{query}"
 
     def _get_analysis_plan(self, query: str) -> str:
         """Generates a step-by-step plan to answer the user's query."""
-        prompt = """
+        prompt = f"""
 You are an expert data analysis planner. Create a concise, step-by-step plan to answer the user's question based on the provided DataFrame context.
 
 **DataFrame Context:**
@@ -162,7 +162,7 @@ Provide a clear, one-line plan. The plan should be a set of instructions for a p
     def _generate_and_execute_code(self, plan: str) -> Union[Dict[str, Any], None]:
         """Generates and safely executes Python code based on the analysis plan."""
         logger.info("Step 2: Generating Python code...")
-        prompt = """
+        prompt = f"""
 You are an expert Python code generator for data analysis.
 **Plan to Execute:** {plan}
 
@@ -201,7 +201,10 @@ You are an expert Python code generator for data analysis.
         elif 'df' in result:
             df_res = result['df']
             if isinstance(df_res, (pd.DataFrame, pd.Series)) and not df_res.empty:
-                raw_result_html = df_res.to_frame().head(20).to_html(index=False, classes="table", border=0)
+                # Convert Series to DataFrame for consistent handling
+                if isinstance(df_res, pd.Series):
+                    df_res = df_res.to_frame()
+                raw_result_html = df_res.head(20).to_html(index=False, classes="table", border=0)
             else:
                 raw_result_html = "<p>The analysis returned an empty dataset.</p>"
         elif 'text' in result:
@@ -237,7 +240,9 @@ You are a business insights analyst. Your task is to interpret a raw analysis ou
 
         try:
             # 1. Intent / Clarification
-            intent = self_get_intent(query)
+            # --- FIX STARTS HERE ---
+            intent = self._get_intent(query) # Corrected from self_get_intent to self._get_intent
+            # --- FIX ENDS HERE ---
             if intent.get("type") == "clarification":
                 question = intent.get("question", "Could you please clarify your request?")
                 self.conversation_history.append({"role": "assistant", "content": question})
