@@ -9,7 +9,6 @@ from pandasai.llm import OpenAI as PandasAIOpenAI
 from openai import OpenAI
 from core.statistical_analyzer import StatisticalAnalyzer
 
-# Custom exception
 class LLMError(Exception):
     pass
 
@@ -17,7 +16,6 @@ class LLMError(Exception):
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Custom OpenAI Wrapper
 class OpenAILLM:
     def __init__(self):
         api_key = os.environ.get("OPENAI_API_KEY")
@@ -52,7 +50,6 @@ class OpenAILLM:
             raise LLMError(f"LLM streaming failed: {str(e)}")
 
 
-# Final StatisticalLLMAgent
 class StatisticalLLMAgent:
     def __init__(self, df: pd.DataFrame, analyzer: StatisticalAnalyzer):
         self.df = df
@@ -95,21 +92,20 @@ Column Details:
 
     def _build_prompt(self, query: str) -> str:
         system_prompt = """
-You are an expert data analyst. Your job is to answer questions about the provided dataset.
-- If the query is ambiguous, ask a clarifying question.
-- If it is clear, answer using relevant statistics or code.
-- Use charts if helpful and describe them clearly.
+You are a data analyst. Provide clear, structured explanations in your answers.
+- If the response includes numbers or rows, summarize the insight before presenting the table.
+- If a chart is shown, explain what it reveals.
+- Avoid vague answers; be concise, structured, and professional.
 """
         examples = """
 Examples:
-User: "What's the average deal size?"
-Assistant: "The average deal size is 1,200 sqft."
+User: "What's the average rent?"
+Assistant: "The average rent is ₹4,125 per sq ft, based on 2,703 deals."
 
-User: "Show me the biggest tenants."
-Assistant: "Do you mean by total area or by number of units?"
+User: "Show deal size distribution"
+Assistant: "Here’s a histogram of deal sizes. Most deals cluster between 2,000–5,000 sq ft."
 """
         history = "\n".join([f"{msg['role'].title()}: {msg['content']}" for msg in self.conversation_history])
-
         return f"{system_prompt}\n\nDataset Context:\n{self.dataset_context}\n\nConversation:\n{history}\n\nExamples:\n{examples}\n\nUser Query: \"{query}\""
 
     def _get_intent(self, query: str) -> Dict[str, Any]:
@@ -134,7 +130,7 @@ Query: "{query}"
             logger.info(f"Intent response: {content}")
             return json.loads(content)
         except json.JSONDecodeError:
-            logger.warning("Intent check failed (invalid JSON). Proceeding as clear.")
+            logger.warning("Intent check failed. Proceeding as clear.")
             return {"type": "clear_query"}
         except Exception as e:
             logger.error(f"Intent check failed: {e}")
@@ -157,17 +153,23 @@ Query: "{query}"
             pandasai_response = self.smart_dataframe.chat(full_prompt)
 
             if isinstance(pandasai_response, pd.DataFrame):
-                html = pandasai_response.to_html(index=False)
-                self.conversation_history.append({"role": "assistant", "content": html})
-                yield html
+                summary = f"Here’s a summary of the result based on your query:\n\n"
+                html_table = pandasai_response.to_html(index=False)
+                self.conversation_history.append({"role": "assistant", "content": summary + html_table})
+                yield summary + html_table
+
             elif isinstance(pandasai_response, str) and pandasai_response.strip().endswith(".png"):
                 url = f"https://mallgpt.waysaheadglobal.com/{pandasai_response.replace(os.sep, '/')}"
-                img_html = f'<img src="{url}" alt="Chart" style="max-width:100%;">'
+                explanation = f"This chart visualizes the requested data:"
+                img_html = f'<p>{explanation}</p><img src="{url}" alt="Chart" style="max-width:100%;">'
                 self.conversation_history.append({"role": "assistant", "content": img_html})
                 yield img_html
+
             elif isinstance(pandasai_response, str):
-                self.conversation_history.append({"role": "assistant", "content": pandasai_response})
-                yield pandasai_response
+                formatted = f"<div style='white-space: pre-line;'>{pandasai_response.strip()}</div>"
+                self.conversation_history.append({"role": "assistant", "content": formatted})
+                yield formatted
+
             else:
                 fallback = str(pandasai_response)
                 self.conversation_history.append({"role": "assistant", "content": fallback})
@@ -178,22 +180,20 @@ Query: "{query}"
             yield "⚠️ Sorry, I encountered an error while processing your query."
 
     def suggest_questions(self) -> List[str]:
-        """Suggests questions based on the dataset context (uses analyzer)."""
         suggestions = [
-            "Which brands or tenants have the largest retail footprint (deal size in sft) in Inorbit Mall Hyderabad?",
-            "What is the distribution of deal sizes (in square feet) for retail spaces in Inorbit Mall Hyderabad?",
-            "How many retail units are currently occupied versus vacant in Inorbit Mall Hyderabad?",
-            "What is the average number of seats available in retail units within Inorbit Mall Hyderabad?",
-            "What is the breakdown of deal types (e.g., new lease, renewal) within Inorbit Mall Hyderabad?"
+            "Which tenants have the largest deal sizes?",
+            "Show a distribution of rental rates by floor.",
+            "How many units are vacant versus leased?",
+            "What’s the average chargeable area per unit?",
+            "Which brands have the highest total area leased?"
         ]
 
         if self.analyzer and self.analyzer.numeric_columns:
             col1 = self.analyzer.numeric_columns[0]
             suggestions.extend([
-                f"What is the average and standard deviation of {col1}?",
-                f"Are there outliers in {col1}?"
+                f"What is the mean and standard deviation of {col1}?",
+                f"Are there any significant outliers in {col1}?"
             ])
-
             if len(self.analyzer.numeric_columns) > 1:
                 col2 = self.analyzer.numeric_columns[1]
                 suggestions.append(f"Is there a correlation between {col1} and {col2}?")
