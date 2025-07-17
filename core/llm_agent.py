@@ -12,7 +12,6 @@ from core.statistical_analyzer import StatisticalAnalyzer
 class LLMError(Exception):
     pass
 
-# Setup logger
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -63,7 +62,12 @@ class StatisticalLLMAgent:
         self.smart_dataframe = SmartDataframe(df, config={
             "llm": self.pandasai_llm,
             "enable_cache": False,
-            "save_charts": True
+            "save_charts": True,
+            "verbose": True,
+            "show_code": True,
+            "enable_retries": True,
+            "custom_head": "Explain the approach before executing code.",
+            "custom_tail": "Ensure output includes reasoning, code used, and final results in readable format."
         })
 
         self.dataset_context = self._generate_dataset_context()
@@ -93,9 +97,7 @@ Column Details:
     def _build_prompt(self, query: str) -> str:
         system_prompt = """
 You are a data analyst. Provide clear, structured explanations in your answers.
-- If the response includes numbers or rows, summarize the insight before presenting the table.
-- If a chart is shown, explain what it reveals.
-- Avoid vague answers; be concise, structured, and professional.
+Avoid showing code unless explicitly asked.
 """
         examples = """
 Examples:
@@ -150,30 +152,52 @@ Query: "{query}"
             self.conversation_history.append({"role": "user", "content": query})
             full_prompt = self._build_prompt(query)
 
+            # Step 1: Get result from PandasAI
             pandasai_response = self.smart_dataframe.chat(full_prompt)
 
+            # Step 2: Convert to plain text for GPT
             if isinstance(pandasai_response, pd.DataFrame):
-                summary = f"Here’s a summary of the result based on your query:\n\n"
-                html_table = pandasai_response.to_html(index=False)
-                self.conversation_history.append({"role": "assistant", "content": summary + html_table})
-                yield summary + html_table
-
-            elif isinstance(pandasai_response, str) and pandasai_response.strip().endswith(".png"):
-                url = f"https://mallgpt.waysaheadglobal.com/{pandasai_response.replace(os.sep, '/')}"
-                explanation = f"This chart visualizes the requested data:"
-                img_html = f'<p>{explanation}</p><img src="{url}" alt="Chart" style="max-width:100%;">'
-                self.conversation_history.append({"role": "assistant", "content": img_html})
-                yield img_html
-
+                result_str = f"Data:\n{pandasai_response.to_markdown(index=False)}"
             elif isinstance(pandasai_response, str):
-                formatted = f"<div style='white-space: pre-line;'>{pandasai_response.strip()}</div>"
-                self.conversation_history.append({"role": "assistant", "content": formatted})
-                yield formatted
-
+                result_str = pandasai_response
+            elif isinstance(pandasai_response, (int, float, bool)):
+                result_str = f"Result: {pandasai_response}"
             else:
-                fallback = str(pandasai_response)
-                self.conversation_history.append({"role": "assistant", "content": fallback})
-                yield fallback
+                result_str = str(pandasai_response)
+
+            chart_html = ""
+            if isinstance(pandasai_response, str) and pandasai_response.strip().endswith(".png"):
+                chart_path = pandasai_response.strip().replace(os.sep, "/")
+                public_url = f"https://mallgpt.waysaheadglobal.com/{chart_path}"
+                chart_html = f"<img src='{public_url}' style='max-width:100%;'><br>"
+
+            # Step 3: Send result to GPT for business explanation
+            gpt_prompt = """
+You are a business analyst assistant.
+
+You will be given an analysis result generated from a data science tool (like PandasAI). Your job is to:
+- Ignore any code or technical syntax
+- Summarize the findings in clear, professional business terms
+- Present the insight in simple HTML with explanation and tables
+- If a chart is present, describe what it shows
+
+Here is the analysis result:
+
+Now, generate a clean HTML response for a business user. Do not show code. Just explain what the data shows and why it matters.
+"""
+
+            gpt_response = self.client.chat.completions.create(
+                model="gpt-4.1-nano",
+                messages=[{"role": "user", "content": gpt_prompt}],
+                temperature=0.3,
+                max_tokens=1000
+            )
+
+            business_html = gpt_response.choices[0].message.content.strip()
+            final_output = chart_html + business_html
+
+            self.conversation_history.append({"role": "assistant", "content": final_output})
+            yield final_output
 
         except Exception as e:
             logger.error(f"Error during query processing: {e}")
